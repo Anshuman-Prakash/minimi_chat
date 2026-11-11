@@ -131,7 +131,7 @@ export function conversationExists(id: number): boolean {
 }
 
 export function listConversations(): ConversationRow[] {
-  return db.prepare("SELECT id, title, created_at FROM conversations ORDER BY id DESC LIMIT 100").all() as unknown as ConversationRow[];
+  return db.prepare("SELECT id, title, created_at FROM conversations ORDER BY created_at DESC, id DESC LIMIT 100").all() as unknown as ConversationRow[];
 }
 
 export function addMessage(conversationId: number, role: Role, content: string, at: Date, tz: string, meta?: object): number {

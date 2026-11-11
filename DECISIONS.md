@@ -158,3 +158,13 @@ Two kinds of grading, kept separate: cheap deterministic checks (did it recall, 
 **D51. Why in-process rather than over HTTP:** the eval measures the pipeline, not the socket; it can await the background fact extraction between the two messages of a follow-up case; and it needs no running server.
 
 Status: the eval script was exercised end to end against faked APIs. It has not yet been run against the real ones (no keys on the build machine), so the latency table and prompt quality are still unmeasured.
+
+## Phase 6: docs
+
+**D52. DESIGN.md is one page and leads with the reading of the problem**, because every later choice follows from "this is a memory-over-time test". README is for someone who wants to run it and try the sample questions in under five minutes.
+
+## Open items (not decisions)
+
+- **Not yet run against the real APIs.** Everything was built and tested without keys: unit tests for dates, recall and seeding (28), and the full turn pipeline against Anthropic and Tavily faked at the `fetch` level. Still to do with real keys: `npm run eval -- --judge`, then tune prompts and record the latency numbers.
+- **Latency targets are unmeasured.** If no-search answers miss ~1 s to first token, the first lever is skipping the planner for trivial messages (greetings), the second is `SEARCH_DEPTH=basic`.
+- **Things to watch in the first real run:** whether Tavily's `extract` returns usable text for JavaScript-heavy pricing pages; whether the planner sets `reverify` reliably; whether `unknownCitations` in the turn log stays at 0.
