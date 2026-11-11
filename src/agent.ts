@@ -6,13 +6,15 @@
 import { z } from "zod";
 import { now } from "./clock";
 import { config, missingKeys } from "./config";
+import { loadContext, updateSummary } from "./context";
 import * as store from "./db";
 import type { Source } from "./db";
+import { recordFacts } from "./facts";
 import { describeError, streamAnswer, type AnswerMessage, type AnswerTool } from "./llm";
 import { isIsoDate, plan, type Plan } from "./planner";
 import { SYSTEM_PROMPT, pastAnswer, renderResults, userTurn } from "./prompts";
 import { recall } from "./recall";
-import { withPolicies, type SearchQuery } from "./search/provider";
+import { withPolicies, type SearchQuery, type SearchResult } from "./search/provider";
 import { tavily } from "./search/tavily";
 import { SourceBook, citedNumbers } from "./sources";
 
@@ -25,7 +27,7 @@ export type TurnEvent =
   | { type: "error"; message: string; conversationId: number };
 
 export interface Timings {
-  mode: Plan["mode"];
+  mode: "direct" | "search" | "reverify";
   recalled: number; // past exchanges put in front of the model
   planMs: number;
   searchMs: number; // planned searches only
@@ -63,7 +65,13 @@ const WEB_SEARCH_TOOL: AnswerTool = {
 };
 const WebSearchInput = z.object({ query: z.string().trim().min(1), since: z.string().optional() });
 
-export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, signal: AbortSignal): Promise<void> {
+/**
+ * Resolves when the answer has been sent and saved. `background` resolves when
+ * the after-work (fact extraction, summary) is done; the server ignores it,
+ * scripts await it so that what they do next can rely on it.
+ */
+export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, signal: AbortSignal): Promise<{ background: Promise<void> }> {
+  const idle = { background: Promise.resolve() };
   const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
   const at = now();
@@ -74,7 +82,7 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
       : store.createConversation(titleFrom(input.text), at);
 
   // Read history before saving the new message so it isn't included twice.
-  const history = store.recentMessages(conversationId, config.historyMessages);
+  const { summary, history } = loadContext(conversationId);
   const userMessageId = store.addMessage(conversationId, "user", input.text, at, input.tz);
   emit({ type: "status", text: "Thinking…" });
 
@@ -92,26 +100,47 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
     //    still has the tool and can search on its own, just one round later.
     const thePlan = await plan({ text: input.text, history, memoryBlock: memory.block, now: at, tz: input.tz }, signal).catch((err): Plan => {
       if (signal.aborted) throw err;
-      return { mode: "direct", queries: [] };
+      return { mode: "direct", reverify: false, queries: [] };
     });
     const planMs = elapsed();
 
-    // 3. Planned searches, all at once.
+    // 3. Planned work, all at once: the searches, and (when re-verifying) a fresh
+    //    copy of the very pages the recalled answer cited, so then and now are
+    //    compared on the same source.
     let searches = 0;
     let searchBlock: string | undefined;
     if (thePlan.mode === "search") {
-      emit({ type: "status", text: `Searching: ${thePlan.queries.map((q) => q.query).join(" · ")}` });
+      const refetch = thePlan.reverify ? memory.citedUrls.slice(0, config.maxRefetchUrls) : [];
+      const doing = [
+        ...(refetch.length ? [`Re-checking ${refetch.length} page${refetch.length > 1 ? "s" : ""} I cited then`] : []),
+        ...(thePlan.queries.length ? [`Searching: ${thePlan.queries.map((q) => q.query).join(" · ")}`] : []),
+      ];
+      emit({ type: "status", text: doing.join(" · ") || "Checking…" });
       searches += thePlan.queries.length;
-      const settled = await Promise.allSettled(thePlan.queries.map((q) => search.search(q, signal)));
-      if (signal.aborted) return;
+
+      const [refetched, ...settled] = await Promise.allSettled([
+        refetch.length ? search.extract(refetch, input.text, signal) : Promise.resolve([]),
+        ...thePlan.queries.map((q) => search.search(q, signal)),
+      ]);
+      if (signal.aborted) return idle;
+
+      const parts: string[] = [];
+      if (refetch.length) {
+        parts.push(
+          refetched.status === "fulfilled" && refetched.value.length
+            ? `Fetched again just now: pages the earlier answer cited.\n\n${renderResults(book.number(refetched.value))}`
+            : "The pages the earlier answer cited could not be fetched again just now.",
+        );
+      }
       const ok = settled.flatMap((s) => (s.status === "fulfilled" ? [s.value] : []));
       const failed = settled.length - ok.length;
-      if (!ok.length) {
-        searchBlock = "Web search is unavailable right now, so nothing could be checked for this message.";
-      } else {
-        searchBlock = renderResults(book.number(ok.flat()));
-        if (failed) searchBlock += `\n\n(${failed} of ${settled.length} searches failed and are missing above.)`;
+      if (ok.length) {
+        parts.push(`Search results.\n\n${renderResults(book.number(mergeByUrl(ok.flat())))}`);
+        if (failed) parts.push(`(${failed} of ${settled.length} searches failed and are missing above.)`);
+      } else if (settled.length) {
+        parts.push("Web search is unavailable right now, so nothing new could be searched for this message.");
       }
+      searchBlock = parts.join("\n\n");
     }
     // Everything citable this turn: earlier sources of this conversation, sources of recalled answers, new results.
     emit({ type: "sources", sources: book.all() });
@@ -124,7 +153,7 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
         role: m.role,
         content: m.role === "assistant" ? pastAnswer(m.content, pastSources.get(m.id) ?? []) : m.content,
       })),
-      { role: "user", content: userTurn({ text: input.text, now: at, tz: input.tz, memoryBlock: memory.block, searchBlock }) },
+      { role: "user", content: userTurn({ text: input.text, now: at, tz: input.tz, summary, memoryBlock: memory.block, searchBlock }) },
     ];
 
     let ttftMs: number | null = null;
@@ -175,7 +204,7 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
           }
         }),
       );
-      if (signal.aborted) return;
+      if (signal.aborted) return idle;
       emit({ type: "sources", sources: book.all() });
       // Assistant content goes back unchanged (it may contain thinking blocks the API expects to see again).
       messages.push({ role: "assistant", content: final.content }, { role: "user", content: results });
@@ -195,10 +224,23 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
     // 5. Save the answer and the sources it actually cited.
     const cited = citedNumbers(answer);
     const known = book.all();
-    const timings: Timings = { mode: thePlan.mode, recalled: memory.turns.length, planMs, searchMs, searches, ttftMs, totalMs: elapsed() };
-    const messageId = store.addMessage(conversationId, "assistant", answer, now(), input.tz, { timings });
-    store.addSources(messageId, known.filter((s) => cited.has(s.n)));
+    const mode = thePlan.reverify ? "reverify" : thePlan.mode;
+    const timings: Timings = { mode, recalled: memory.turns.length, planMs, searchMs, searches, ttftMs, totalMs: elapsed() };
+    const answeredAt = now();
+    const messageId = store.addMessage(conversationId, "assistant", answer, answeredAt, input.tz, { timings });
+    const citedSources = known.filter((s) => cited.has(s.n));
+    store.addSources(messageId, citedSources);
     emit({ type: "done", conversationId, messageId, timings });
+
+    // 6. After the user has their answer: index it for later recall, and keep
+    //    the conversation summary up to date. Failures here are logged, never surfaced.
+    const background = Promise.allSettled([
+      recordFacts({ messageId, question: input.text, answer, observedAt: answeredAt.toISOString(), sources: citedSources }),
+      updateSummary(conversationId),
+    ]).then((results) => {
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed) log({ conversationId, messageId, backgroundFailures: failed });
+    });
     log({
       conversationId,
       ...timings,
@@ -208,15 +250,28 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
       inputTokens: final.usage.input_tokens,
       outputTokens: final.usage.output_tokens,
     });
+    return { background };
   } catch (err) {
-    if (signal.aborted) return; // user closed the tab; nothing to report
+    if (signal.aborted) return idle; // user closed the tab; nothing to report
     const message = err instanceof ConfigError ? err.message : describeError(err);
     emit({ type: "error", message, conversationId });
     log({ conversationId, totalMs: elapsed(), error: err instanceof Error ? err.name : "unknown" });
+    return idle;
   }
 }
 
 class ConfigError extends Error {}
+
+/** Several queries often return the same page. Show it once, with the distinct passages each query found. */
+function mergeByUrl(results: SearchResult[]): SearchResult[] {
+  const byUrl = new Map<string, SearchResult>();
+  for (const r of results) {
+    const seen = byUrl.get(r.url);
+    if (!seen) byUrl.set(r.url, { ...r });
+    else if (!seen.content.includes(r.content)) seen.content += `\n[…]\n${r.content}`;
+  }
+  return [...byUrl.values()];
+}
 
 function titleFrom(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();

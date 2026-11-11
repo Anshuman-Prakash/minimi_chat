@@ -14,8 +14,10 @@ export interface Recall {
   block: string | null;
   /** One-line status for the UI, e.g. "Checking my notes from Tuesday 3 November 2026…". */
   status: string | null;
-  /** The turns that were recalled (used later for claims and re-verification). */
+  /** The exchanges that were recalled. */
   turns: Turn[];
+  /** Pages the recalled answers cited: what to re-fetch when the user asks "is it still true?". */
+  citedUrls: string[];
 }
 
 // A date only triggers a lookup when the message is about the user and the
@@ -58,17 +60,21 @@ export function recall(
 
   const sections: string[] = [];
   const turns: Turn[] = [];
+  const cited = new Set<string>();
   const render = (t: Turn[]) => {
     turns.push(...t);
-    return t.map((turn) => renderTurn(turn, args.tz, book)).join("\n\n");
+    return t.map((turn) => renderTurn(turn, args.tz, book, cited)).join("\n\n");
   };
+  const result = (status: string): Recall => ({ block: sections.join("\n\n"), status, turns, citedUrls: [...cited] });
 
   if (refs.length) {
+    const labels: string[] = [];
     for (const ref of refs) {
       const found = lookupByDate(ref, words, args.messageId);
       sections.push(describeDateLookup(ref, found, words, render));
+      labels.push((found.window ?? ref.candidates[0]!).label); // the day actually used, not just the first guess
     }
-    return { block: sections.join("\n\n"), status: `Checking my notes from ${refs.map((r) => r.candidates[0]!.label).join(" and ")}…`, turns };
+    return result(`Checking my notes from ${labels.join(" and ")}…`);
   }
 
   if (cue) {
@@ -84,10 +90,10 @@ export function recall(
           : `NO RECORD FOUND: there are no earlier conversations stored${words.length ? ` matching: ${words.join(", ")}` : ""}.`,
       );
     }
-    return { block: sections.join("\n\n"), status: "Checking my notes…", turns };
+    return result("Checking my notes…");
   }
 
-  return { block: null, status: null, turns: [] };
+  return { block: null, status: null, turns: [], citedUrls: [] };
 }
 
 interface DateLookup {
@@ -154,7 +160,7 @@ function rankByTopic(turns: Turn[], words: string[]): { turns: Turn[]; score: nu
 
 function describeDateLookup(ref: TemporalRef, found: DateLookup, words: string[], render: (t: Turn[]) => string): string {
   const [primary, ...others] = ref.candidates;
-  const topic = words.length ? ` about: ${words.join(", ")}` : "";
+  const topic = words.length ? ` matching the topic words (${words.join(", ")})` : "";
 
   if (!found.window) {
     const tried = ref.candidates.map((c) => `${c.label} (${c.reading})`).join("; or ");
@@ -172,12 +178,12 @@ function describeDateLookup(ref: TemporalRef, found: DateLookup, words: string[]
     head += ` Another possible reading is ${others.map((c) => c.label).join(" or ")}; mention the date you used.`;
   }
   const scope = found.matchedTopic
-    ? `${found.turns.length} exchange(s) in that window match the topic${topic} (${found.totalThatDay} exchange(s) in total in that window).`
+    ? `Showing ${found.turns.length} exchange(s)${topic}, out of ${found.totalThatDay} in that window.`
     : `${words.length ? `Nothing in that window matches the topic words (${words.join(", ")}). ` : ""}Showing ${found.turns.length} of ${found.totalThatDay} exchange(s) from that window.`;
   return `${head}\n${scope}\n\n${render(found.turns)}`;
 }
 
-function renderTurn(turn: Turn, tz: string, book: SourceBook): string {
+function renderTurn(turn: Turn, tz: string, book: SourceBook, cited: Set<string>): string {
   const when = formatLocal(new Date(turn.question.created_at), tz);
   const lines = [`--- Past exchange · ${when} (${tz}) · conversation "${turn.title}"`, `User asked: ${clip(turn.question.content)}`];
   if (!turn.answer) {
@@ -193,6 +199,22 @@ function renderTurn(turn: Turn, tz: string, book: SourceBook): string {
       lines.push("Sources cited in that answer:");
       for (const s of renumbered) lines.push(`[${s.n}] ${s.title} - ${s.url}${s.publishedDate ? ` (published ${s.publishedDate})` : ""}`);
     }
+
+    // The index built after that answer was sent (see facts.ts). The count matters:
+    // it is what lets the model notice "you said five, I have four".
+    const facts = store.factsFor(turn.answer.id);
+    if (facts.entities.length) lines.push(`Named in this exchange (${facts.entities.length}): ${facts.entities.map((e) => e.name).join(", ")}`);
+    if (facts.claims.length) {
+      const numberOf = new Map(renumbered.map((s) => [s.url, s.n]));
+      lines.push("Facts stated in that answer (as of that date):");
+      for (const c of facts.claims) {
+        const n = c.sourceUrl ? numberOf.get(c.sourceUrl) : undefined;
+        lines.push(`- ${c.entity} | ${c.attribute}: ${c.value}${n ? ` [${n}]` : " (no source recorded)"}`);
+      }
+    }
+    // Pages behind recorded facts first, then the rest of what the answer cited.
+    for (const c of facts.claims) if (c.sourceUrl) cited.add(c.sourceUrl);
+    for (const s of renumbered) cited.add(s.url);
   }
   lines.push("---");
   return lines.join("\n");

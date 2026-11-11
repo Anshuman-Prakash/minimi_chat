@@ -2,16 +2,16 @@
 // which searches to run first. Running these in parallel before the answer
 // model starts saves a full round trip of the larger model.
 
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { formatLocal } from "./clock";
 import { config } from "./config";
 import type { MessageRow } from "./db";
-import { anthropic } from "./llm";
+import { fastJson } from "./llm";
 import type { SearchQuery } from "./search/provider";
 
 const PlanSchema = z.object({
   mode: z.enum(["direct", "search"]).describe("direct = answer without searching first; search = run the queries first"),
+  reverify: z.boolean().describe("true only when the user asks whether information from a recalled past conversation is still correct, has changed, or what is new since"),
   queries: z.array(
     z.object({
       query: z.string().describe("A focused web search query, the way an expert would type it"),
@@ -22,6 +22,8 @@ const PlanSchema = z.object({
 
 export interface Plan {
   mode: "direct" | "search";
+  /** Re-fetch the pages the recalled answer cited, in addition to the queries. */
+  reverify: boolean;
   queries: SearchQuery[];
 }
 
@@ -31,8 +33,8 @@ Choose "search" when a good answer depends on something that can change or that 
 Choose "direct" for greetings and small talk, questions about the conversation itself, writing or coding help, reasoning, maths, and facts that do not change.
 
 Past conversations: when the message refers to an earlier conversation, a <memory> block shows what the application found in its records.
-- If the user asks whether something from that conversation is still true, has changed, or what is new since then, choose "search" and write queries that check the specific products and facts named in the record. Use the names from the record, not the user's shorthand ("them", "those tools").
-- If the user only asks what was said, or the record says NO RECORD FOUND, choose "direct": there is nothing to verify.
+- If the user asks whether something from that conversation is still true, has changed, or what is new since then, set reverify to true, choose "search", and write queries that check the specific products and facts named in the record. Use the names from the record, not the user's shorthand ("them", "those tools"). For "what's new since" questions, add a news query per product with "since" set to the date of that conversation.
+- If the user only asks what was said, or the record says NO RECORD FOUND, choose "direct" with reverify false: there is nothing to verify.
 
 Writing queries (only for "search"):
 - One query per distinct thing to look up; at most ${config.maxPlannedQueries}. A question about five products usually needs one query per product.
@@ -52,17 +54,10 @@ export async function plan(
     .map((m) => `${m.role}: ${clip(m.content, 600)}`)
     .join("\n");
 
-  const res = await anthropic().messages.parse(
-    {
-      model: config.fastModel,
-      max_tokens: 1024,
-      thinking: { type: "disabled" }, // routing is simple; skip thinking for speed
-      output_config: { effort: "low", format: zodOutputFormat(PlanSchema) },
-      system: PLANNER_SYSTEM,
-      messages: [
-        {
-          role: "user",
-          content: `Today is ${formatLocal(args.now, args.tz)} (${args.tz}).
+  const parsed = await fastJson({
+    schema: PlanSchema,
+    system: PLANNER_SYSTEM,
+    user: `Today is ${formatLocal(args.now, args.tz)} (${args.tz}).
 
 <recent_conversation>
 ${recent || "(none)"}
@@ -71,20 +66,17 @@ ${args.memoryBlock ? `\n<memory>\n${clip(args.memoryBlock, 8000)}\n</memory>\n` 
 <message>
 ${args.text}
 </message>`,
-        },
-      ],
-    },
-    { signal, timeout: config.plannerTimeoutMs, maxRetries: 0 },
-  );
-
-  const parsed = res.parsed_output;
-  if (!parsed) throw new Error("planner returned no parsable plan");
+    think: false, // routing is simple; skipping thinking keeps this call short
+    timeoutMs: config.plannerTimeoutMs,
+    signal,
+  });
 
   const queries = parsed.queries
     .filter((q) => q.query.trim())
     .slice(0, config.maxPlannedQueries)
     .map((q): SearchQuery => ({ query: q.query.trim(), ...(isIsoDate(q.since) ? { since: q.since } : {}) }));
-  return { mode: parsed.mode === "search" && queries.length ? "search" : "direct", queries };
+  const reverify = parsed.reverify && args.memoryBlock !== null;
+  return { mode: (parsed.mode === "search" && queries.length) || reverify ? "search" : "direct", reverify, queries };
 }
 
 export function isIsoDate(s: unknown): s is string {

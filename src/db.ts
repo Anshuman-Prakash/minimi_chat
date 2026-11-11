@@ -47,6 +47,38 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS sources_by_message ON sources(message_id);
 
+  -- Checkable facts taken from an assistant answer, e.g.
+  -- ("Neon", "Launch plan price", "$19/month", <pricing page url>).
+  -- They make "has it changed?" a comparison against a list, not a re-reading of prose.
+  CREATE TABLE IF NOT EXISTS claims (
+    id                    INTEGER PRIMARY KEY,
+    message_id            INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    entity                TEXT NOT NULL,
+    attribute             TEXT NOT NULL,
+    value                 TEXT NOT NULL,
+    source_url            TEXT,
+    source_published_date TEXT,
+    observed_at           TEXT NOT NULL   -- when the assistant stated it (UTC)
+  );
+  CREATE INDEX IF NOT EXISTS claims_by_message ON claims(message_id);
+
+  -- The named things an exchange was about (e.g. the CRM tools on a shortlist),
+  -- so "them" in a later conversation has a definite list behind it.
+  CREATE TABLE IF NOT EXISTS entities (
+    id         INTEGER PRIMARY KEY,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS entities_by_message ON entities(message_id);
+
+  -- Rolling summary of the older part of a long conversation.
+  CREATE TABLE IF NOT EXISTS summaries (
+    conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    text            TEXT NOT NULL,
+    upto_message_id INTEGER NOT NULL   -- the summary covers messages up to and including this id
+  );
+
   -- Keyword index over message text. "External content": the text lives in
   -- messages; triggers keep the index in step. Porter stemming lets
   -- "hosting" match "hosted" and "prices" match "price".
@@ -215,10 +247,58 @@ export function matchMessages(keywords: string[], among?: number[]): number[] {
   return rows.map((r) => r.id);
 }
 
-/** The last `limit` messages of a conversation, oldest first. */
-export function recentMessages(conversationId: number, limit: number): MessageRow[] {
+// ---- Facts extracted from answers ----
+
+export interface Claim {
+  entity: string;
+  attribute: string;
+  value: string;
+  sourceUrl: string | null;
+  sourcePublishedDate: string | null;
+}
+export interface Entity {
+  name: string;
+  kind: string;
+}
+
+export function addFacts(messageId: number, observedAt: string, entities: Entity[], claims: Claim[]): void {
+  const e = db.prepare("INSERT INTO entities (message_id, name, kind) VALUES (?, ?, ?)");
+  for (const x of entities) e.run(messageId, x.name, x.kind);
+  const c = db.prepare(
+    "INSERT INTO claims (message_id, entity, attribute, value, source_url, source_published_date, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  for (const x of claims) c.run(messageId, x.entity, x.attribute, x.value, x.sourceUrl, x.sourcePublishedDate, observedAt);
+}
+
+export function factsFor(messageId: number): { entities: Entity[]; claims: Claim[] } {
+  const entities = db.prepare("SELECT name, kind FROM entities WHERE message_id = ? ORDER BY id").all(messageId) as unknown as Entity[];
   const rows = db
-    .prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?")
-    .all(conversationId, limit) as unknown as MessageRow[];
-  return rows.reverse();
+    .prepare("SELECT entity, attribute, value, source_url, source_published_date FROM claims WHERE message_id = ? ORDER BY id")
+    .all(messageId) as unknown as { entity: string; attribute: string; value: string; source_url: string | null; source_published_date: string | null }[];
+  return {
+    entities,
+    claims: rows.map((r) => ({ entity: r.entity, attribute: r.attribute, value: r.value, sourceUrl: r.source_url, sourcePublishedDate: r.source_published_date })),
+  };
+}
+
+// ---- Conversation context ----
+
+export interface Summary {
+  text: string;
+  upto_message_id: number;
+}
+
+export function getSummary(conversationId: number): Summary | undefined {
+  return db.prepare("SELECT text, upto_message_id FROM summaries WHERE conversation_id = ?").get(conversationId) as unknown as Summary | undefined;
+}
+
+export function saveSummary(conversationId: number, text: string, uptoMessageId: number): void {
+  db.prepare(
+    "INSERT INTO summaries (conversation_id, text, upto_message_id) VALUES (?, ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET text = excluded.text, upto_message_id = excluded.upto_message_id",
+  ).run(conversationId, text, uptoMessageId);
+}
+
+/** Messages newer than the summary (all of them if there is no summary), oldest first. */
+export function messagesAfter(conversationId: number, afterId: number): MessageRow[] {
+  return db.prepare("SELECT * FROM messages WHERE conversation_id = ? AND id > ? ORDER BY id").all(conversationId, afterId) as unknown as MessageRow[];
 }

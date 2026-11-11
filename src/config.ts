@@ -23,7 +23,14 @@ export const config = {
   nowOverride: env.NOW_OVERRIDE,
 
   // How many past messages of the current conversation go to the model verbatim.
+  // Older ones are folded into a rolling summary, `summarizeEvery` messages at a time.
   historyMessages: 20,
+  summarizeEvery: 10,
+
+  // Re-verification: how many pages cited by a recalled answer are re-fetched.
+  maxRefetchUrls: 8,
+  // Per search result shown to the model; longer page text is cut with a visible marker.
+  resultMaxChars: 4000,
 
   // Recall: how much of the past is put in front of the model for one lookup.
   recallMaxTurns: 6,

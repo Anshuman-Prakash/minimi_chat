@@ -3,6 +3,7 @@
 // so the system prompt stays a cacheable prefix.
 
 import { formatLocal } from "./clock";
+import { config } from "./config";
 import type { Source } from "./db";
 
 export const SYSTEM_PROMPT = `You are a chat assistant with one tool, web search. People talk to you the way they would talk to a well-informed colleague.
@@ -23,6 +24,13 @@ Memory of past conversations
 - If what the user remembers does not match the record (they say five tools and the record lists four; they name a different day), point out the difference and go by the record.
 - Keep "what was said then" separate from "what is true now". Report the past exchange with its date; do not present an old answer as current fact.
 - If a lookup is plainly unrelated to what the user is asking (the date was about something else), ignore it.
+
+Checking whether an earlier answer still holds
+- When the user asks whether something from an earlier conversation is still correct, has changed, or what is new since, compare the record with the fresh results item by item.
+- Open with one sentence: what changed, or that nothing you could check has. Then a compact table with the columns Item, Then (with the date of the earlier conversation), Now, Status, Source. Status is exactly one of: Changed, Unchanged, Couldn't verify.
+- "Unchanged" needs a current source that confirms it. If today's results don't cover an item, mark it "Couldn't verify". No news is not evidence of no change.
+- If the record lists the facts stated then, check each one. If the earlier answer was wrong at the time, not just out of date, say so plainly.
+- For "anything new since" questions, add notable launches or announcements after that date, each with its date and source, or say that you found none.
 
 Web search
 - The application may already have run searches for this message; their results are in a <search_results> block. Use them first.
@@ -48,13 +56,19 @@ export interface NumberedResult extends Source {
 export function renderResults(results: NumberedResult[]): string {
   if (!results.length) return "No results.";
   return results
-    .map((r) => `[${r.n}] ${r.title}\nURL: ${r.url}\nPublished: ${r.publishedDate ?? "unknown"}\n${r.content.trim()}`)
+    .map((r) => `[${r.n}] ${r.title}\nURL: ${r.url}\nPublished: ${r.publishedDate ?? "unknown"}\n${clipResult(r.content.trim())}`)
     .join("\n\n");
 }
 
+function clipResult(text: string): string {
+  return text.length > config.resultMaxChars ? `${text.slice(0, config.resultMaxChars)}\n[…page text cut here]` : text;
+}
+
 /** Wraps the user's message with the per-turn context the model needs. */
-export function userTurn(args: { text: string; now: Date; tz: string; memoryBlock?: string | null; searchBlock?: string }): string {
-  const parts = [`<context>\nCurrent date and time: ${formatLocal(args.now, args.tz)} (${args.tz})\n</context>`];
+export function userTurn(args: { text: string; now: Date; tz: string; summary?: string | null; memoryBlock?: string | null; searchBlock?: string }): string {
+  const context = [`Current date and time: ${formatLocal(args.now, args.tz)} (${args.tz})`];
+  if (args.summary) context.push(`Notes on the earlier part of this conversation (older messages are no longer shown in full):\n${args.summary}`);
+  const parts = [`<context>\n${context.join("\n\n")}\n</context>`];
   if (args.memoryBlock) parts.push(`<memory>\n${args.memoryBlock}\n</memory>`);
   if (args.searchBlock) parts.push(`<search_results>\n${args.searchBlock}\n</search_results>`);
   parts.push(args.text);

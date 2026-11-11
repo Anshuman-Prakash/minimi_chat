@@ -1,6 +1,8 @@
 // Thin wrapper around the Anthropic SDK: one client, one place for model settings.
 
 import Anthropic from "@anthropic-ai/sdk";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import type { z } from "zod";
 import { config } from "./config";
 
 let client: Anthropic | undefined;
@@ -37,6 +39,34 @@ export function streamAnswer(args: { system: string; messages: AnswerMessage[]; 
     },
     { signal },
   );
+}
+
+/**
+ * One structured-output call to the fast model. The API constrains the reply
+ * to the schema, so there is no JSON to repair by hand.
+ */
+export async function fastJson<S extends z.ZodType>(args: {
+  schema: S;
+  system: string;
+  user: string;
+  /** Off for latency-critical routing; on (adaptive, low effort) for background work. */
+  think: boolean;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}): Promise<z.infer<S>> {
+  const res = await anthropic().messages.parse(
+    {
+      model: config.fastModel,
+      max_tokens: 4096,
+      thinking: args.think ? { type: "adaptive" } : { type: "disabled" },
+      output_config: { effort: "low", format: zodOutputFormat(args.schema) },
+      system: args.system,
+      messages: [{ role: "user", content: args.user }],
+    },
+    { signal: args.signal, timeout: args.timeoutMs, maxRetries: 0 },
+  );
+  if (res.parsed_output == null) throw new Error(`fast model returned no parsable output (stop_reason: ${res.stop_reason})`);
+  return res.parsed_output as z.infer<S>;
 }
 
 /** A short, user-safe description of an API failure (never includes keys or bodies). */

@@ -123,3 +123,24 @@ This is a heuristic and is the weakest link in recall; a miss costs a memory loo
 **D39. Recalled citations are renumbered.** An old answer's `[1]` would collide with this conversation's `[1]`. `SourceBook` is seeded with the conversation's existing sources, recalled sources get the next free numbers, and the recalled text is rewritten to match. So the model can cite the page an old answer relied on, and the link is right.
 
 **D40. Recall is synchronous SQLite and runs before the planner** (a few milliseconds). The planner sees the memory block, which is what lets it write "Pipedrive pricing" instead of "them pricing".
+
+## Phase 4: recorded facts, re-verification, long threads
+
+**D41. After each answer, a background step records what it was about and what it claimed.** `facts.ts` asks the fast model (structured output) for *entities* (the named things, including every item of a list) and *claims* (entity, attribute, value, citation number) limited to facts that can go out of date: prices, plans, limits, versions, availability, dates. Code maps the citation number to the stored source URL and publish date. It runs after the `done` event, so it adds nothing to response time.
+Why store claims at all when the full answer is stored: a list of facts with their source pages is something to check item by item, and the entity count is what lets the assistant say "you said five, my record has four".
+The stored answer text is the record; claims are an index over it. If extraction fails, recall still shows the old answer and its sources.
+
+**D42. Re-verification re-fetches the same pages the old answer cited.** The planner sets `reverify: true` when the user asks whether recalled information still holds. Code then calls the provider's `extract` on the URLs behind the recorded claims (then the answer's other citations, 8 at most), in parallel with the planner's fresh searches. Because numbering is by URL, the page keeps the citation number it has in the memory block: "then [1]" and "now [1]" are the same page. Comparing against the same source is the fairest test of "has it changed"; the fresh searches catch news the old page wouldn't show.
+
+**D43. The planner decides whether to verify; code decides what to re-fetch.** The judgment call ("is this a still-true question?") goes to the model. The mechanical part (which URLs) is deterministic. `reverify` is ignored if nothing was recalled.
+
+**D44. Then-vs-now output is specified in the system prompt:** one summary sentence, then a table (Item, Then with date, Now, Status, Source) where Status is exactly Changed / Unchanged / Couldn't verify. "Unchanged" requires a current source; an item today's results don't cover is "Couldn't verify". No news is not evidence of no change.
+
+**D45. Long threads: rolling summary plus a verbatim tail.** The model sees the last ~20 messages in full. When the unsummarised tail reaches 30, the oldest 10 are folded into a running summary by the fast model in the background. The summary travels in the `<context>` block of the newest user turn, so the system prompt stays static. The verbatim tail always begins with a user message (API requirement) and is hard-capped at 30 in case summarising falls behind.
+Rejected: the API's server-side compaction (beta, and built for clients that hold the conversation; here the database does). Not needed for recall: recall reads the full stored messages, never the summary.
+
+**D46. A page returned by several searches is shown once**, with the distinct passages each query found, so the model's context isn't padded with duplicates.
+
+**D47. `runTurn` returns a `background` promise.** The server ignores it; the seed and eval scripts await it so the next step can rely on facts being stored.
+
+Tested offline (APIs faked at the `fetch` level): the re-verify turn re-fetches the cited URLs, keeps their numbers, applies the date filter only to the news query; facts are stored after the answer; a 34-message thread is summarised once and sends 23 messages.

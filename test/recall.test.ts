@@ -22,8 +22,13 @@ store.addSources(pg, [
   { n: 1, url: "https://neon.com/pricing", title: "Neon Pricing", publishedDate: null },
   { n: 2, url: "https://supabase.com/pricing", title: "Supabase Pricing", publishedDate: null },
 ]);
+store.addFacts(pg, "2026-11-03T04:30:20Z", [{ name: "Neon", kind: "product" }, { name: "Supabase", kind: "product" }], [
+  { entity: "Neon", attribute: "Launch plan price", value: "$19/month", sourceUrl: "https://neon.com/pricing", sourcePublishedDate: null },
+  { entity: "Supabase", attribute: "Pro plan price", value: "$25/month", sourceUrl: "https://supabase.com/pricing", sourcePublishedDate: null },
+]);
 // Monday 9 Nov
-exchange("CRM shortlist", "2026-11-09T05:00:00Z", "Shortlist CRM tools for a 20-person sales team", "Four fit well: HubSpot, Pipedrive, Salesforce and Zoho.");
+const crm = exchange("CRM shortlist", "2026-11-09T05:00:00Z", "Shortlist CRM tools for a 20-person sales team", "Four fit well: HubSpot, Pipedrive, Salesforce and Zoho.");
+store.addFacts(crm, "2026-11-09T05:00:20Z", ["HubSpot", "Pipedrive", "Salesforce", "Zoho"].map((name) => ({ name, kind: "product" })), []);
 // Tuesday 10 Nov: mentions pricing, but is not about Postgres
 exchange("Landing page", "2026-11-10T06:00:00Z", "How should I lay out a pricing page?", "Three tiers, the middle one highlighted.");
 
@@ -48,7 +53,8 @@ test('"last Tuesday" is settled by memory: yesterday has no Postgres conversatio
   assert.equal(r.turns.length, 1);
   assert.equal(r.turns[0]!.title, "Postgres hosting");
   assert.match(r.block!, /was read as Tuesday 3 November 2026 \(the Tuesday of the week before\)/);
-  assert.match(r.block!, /The first reading, Tuesday 10 November 2026 .* has no conversation about: postgres, hosting, pricing/);
+  assert.match(r.block!, /The first reading, Tuesday 10 November 2026 .* has no conversation matching the topic words \(postgres, hosting, pricing\)/);
+  assert.match(r.status!, /Checking my notes from Tuesday 3 November 2026/); // the status names the day that was used
   assert.doesNotMatch(r.block!, /pricing page/); // the unrelated chat from 10 Nov is not dragged in
 });
 
@@ -57,6 +63,14 @@ test("weekday: Monday's shortlist, and the record (four tools) is there to contr
   assert.equal(r.turns[0]!.title, "CRM shortlist");
   assert.match(r.block!, /Monday 9 November 2026/);
   assert.match(r.block!, /Four fit well: HubSpot, Pipedrive, Salesforce and Zoho/);
+  assert.match(r.block!, /Named in this exchange \(4\): HubSpot, Pipedrive, Salesforce, Zoho/);
+});
+
+test("recorded facts appear with the source they came from, and those pages are queued for re-checking", () => {
+  const r = ask("Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?");
+  assert.match(r.block!, /- Neon \| Launch plan price: \$19\/month \[1\]/);
+  assert.match(r.block!, /- Supabase \| Pro plan price: \$25\/month \[2\]/);
+  assert.deepEqual(r.citedUrls, ["https://neon.com/pricing", "https://supabase.com/pricing"]);
 });
 
 test("no conversation on that date: an explicit NO RECORD, nothing invented", () => {
