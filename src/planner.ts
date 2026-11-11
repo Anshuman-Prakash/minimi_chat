@@ -30,6 +30,10 @@ const PLANNER_SYSTEM = `You route messages for a chat assistant that has a web s
 Choose "search" when a good answer depends on something that can change or that happened recently: prices, plans, product features and releases, versions, news, people in roles, schedules, scores, laws, "latest" or "current" anything, or when the user asks for sources or to check something.
 Choose "direct" for greetings and small talk, questions about the conversation itself, writing or coding help, reasoning, maths, and facts that do not change.
 
+Past conversations: when the message refers to an earlier conversation, a <memory> block shows what the application found in its records.
+- If the user asks whether something from that conversation is still true, has changed, or what is new since then, choose "search" and write queries that check the specific products and facts named in the record. Use the names from the record, not the user's shorthand ("them", "those tools").
+- If the user only asks what was said, or the record says NO RECORD FOUND, choose "direct": there is nothing to verify.
+
 Writing queries (only for "search"):
 - One query per distinct thing to look up; at most ${config.maxPlannedQueries}. A question about five products usually needs one query per product.
 - Short and specific: names, the attribute wanted, and the year when recency matters. No full sentences.
@@ -38,7 +42,10 @@ Writing queries (only for "search"):
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
-export async function plan(args: { text: string; history: MessageRow[]; now: Date; tz: string }, signal: AbortSignal): Promise<Plan> {
+export async function plan(
+  args: { text: string; history: MessageRow[]; memoryBlock: string | null; now: Date; tz: string },
+  signal: AbortSignal,
+): Promise<Plan> {
   // The planner only needs the gist of recent turns to resolve references like "and the other one?".
   const recent = args.history
     .slice(-4)
@@ -60,7 +67,7 @@ export async function plan(args: { text: string; history: MessageRow[]; now: Dat
 <recent_conversation>
 ${recent || "(none)"}
 </recent_conversation>
-
+${args.memoryBlock ? `\n<memory>\n${clip(args.memoryBlock, 8000)}\n</memory>\n` : ""}
 <message>
 ${args.text}
 </message>`,

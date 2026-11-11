@@ -46,6 +46,21 @@ db.exec(`
     published_date TEXT              -- YYYY-MM-DD or NULL
   );
   CREATE INDEX IF NOT EXISTS sources_by_message ON sources(message_id);
+
+  -- Keyword index over message text. "External content": the text lives in
+  -- messages; triggers keep the index in step. Porter stemming lets
+  -- "hosting" match "hosted" and "prices" match "price".
+  CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content, content='messages', content_rowid='id', tokenize='porter unicode61'
+  );
+  CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+  END;
+  CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+  END;
+  -- Cheap at this scale, and guarantees the index covers rows written before it existed.
+  INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');
 `);
 
 export type Role = "user" | "assistant";
@@ -117,12 +132,87 @@ export function sourcesFor(messageIds: number[]): Map<number, Source[]> {
   return out;
 }
 
-/** Highest citation number used so far in a conversation (0 if none). */
-export function lastSourceNumber(conversationId: number): number {
-  const row = db
-    .prepare("SELECT MAX(s.n) AS n FROM sources s JOIN messages m ON m.id = s.message_id WHERE m.conversation_id = ?")
-    .get(conversationId) as { n: number | null } | undefined;
-  return row?.n ?? 0;
+/** Every source cited so far in a conversation, one row per citation number. */
+export function conversationSources(conversationId: number): Source[] {
+  const rows = db
+    .prepare(
+      `SELECT s.n, s.url, s.title, s.published_date FROM sources s JOIN messages m ON m.id = s.message_id
+       WHERE m.conversation_id = ? GROUP BY s.n ORDER BY s.n`,
+    )
+    .all(conversationId) as unknown as { n: number; url: string; title: string; published_date: string | null }[];
+  return rows.map((r) => ({ n: r.n, url: r.url, title: r.title, publishedDate: r.published_date }));
+}
+
+// ---- Recall queries ----
+
+/** A past exchange: what the user asked and what the assistant answered. */
+export interface Turn {
+  title: string; // conversation title
+  question: MessageRow;
+  answer: MessageRow | null;
+}
+
+function toTurns(questions: (MessageRow & { title: string })[]): Turn[] {
+  const next = db.prepare("SELECT * FROM messages WHERE conversation_id = ? AND id > ? ORDER BY id LIMIT 1");
+  return questions.map(({ title, ...question }) => {
+    const following = next.get(question.conversation_id, question.id) as unknown as MessageRow | undefined;
+    return { title, question, answer: following?.role === "assistant" ? following : null };
+  });
+}
+
+/** Turns whose question was asked in [startUtc, endUtc), oldest first. */
+export function turnsBetween(startUtc: string, endUtc: string, excludeMessageId: number): Turn[] {
+  const rows = db
+    .prepare(
+      `SELECT m.*, c.title FROM messages m JOIN conversations c ON c.id = m.conversation_id
+       WHERE m.role = 'user' AND m.created_at >= ? AND m.created_at < ? AND m.id != ? ORDER BY m.created_at, m.id`,
+    )
+    .all(startUtc, endUtc, excludeMessageId) as unknown as (MessageRow & { title: string })[];
+  return toTurns(rows);
+}
+
+/** The most recent turns from conversations other than the given one, newest first. */
+export function recentTurnsElsewhere(conversationId: number, limit: number): Turn[] {
+  const rows = db
+    .prepare(
+      `SELECT m.*, c.title FROM messages m JOIN conversations c ON c.id = m.conversation_id
+       WHERE m.role = 'user' AND m.conversation_id != ? ORDER BY m.id DESC LIMIT ?`,
+    )
+    .all(conversationId, limit) as unknown as (MessageRow & { title: string })[];
+  return toTurns(rows);
+}
+
+/** Turns matching the keywords anywhere in memory, best match first. */
+export function searchTurns(keywords: string[], excludeMessageId: number, limit: number): Turn[] {
+  const hits = matchMessages(keywords);
+  if (!hits.length) return [];
+  // A hit on an answer counts for the question it answered.
+  const questionOf = db.prepare(
+    `SELECT m.*, c.title FROM messages m JOIN conversations c ON c.id = m.conversation_id
+     WHERE m.conversation_id = (SELECT conversation_id FROM messages WHERE id = ?) AND m.role = 'user' AND m.id <= ? ORDER BY m.id DESC LIMIT 1`,
+  );
+  const seen = new Set<number>();
+  const questions: (MessageRow & { title: string })[] = [];
+  for (const id of hits) {
+    const q = questionOf.get(id, id) as unknown as (MessageRow & { title: string }) | undefined;
+    if (!q || q.id === excludeMessageId || seen.has(q.id)) continue;
+    seen.add(q.id);
+    questions.push(q);
+    if (questions.length === limit) break;
+  }
+  return toTurns(questions);
+}
+
+/** Ids of messages matching any keyword, best (bm25) first. Optionally restricted to a set of ids. */
+export function matchMessages(keywords: string[], among?: number[]): number[] {
+  if (!keywords.length || among?.length === 0) return [];
+  // Each keyword is quoted so user text can never be read as FTS5 query syntax.
+  const query = keywords.map((k) => `"${k.replaceAll('"', '""')}"`).join(" OR ");
+  const restrict = among ? `AND rowid IN (${among.map(Number).join(",")})` : "";
+  const rows = db
+    .prepare(`SELECT rowid AS id FROM messages_fts WHERE messages_fts MATCH ? ${restrict} ORDER BY bm25(messages_fts) LIMIT 50`)
+    .all(query) as unknown as { id: number }[];
+  return rows.map((r) => r.id);
 }
 
 /** The last `limit` messages of a conversation, oldest first. */

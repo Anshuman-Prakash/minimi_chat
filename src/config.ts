@@ -25,6 +25,10 @@ export const config = {
   // How many past messages of the current conversation go to the model verbatim.
   historyMessages: 20,
 
+  // Recall: how much of the past is put in front of the model for one lookup.
+  recallMaxTurns: 6,
+  recallMaxChars: 6000, // per stored message; longer text is cut with a visible marker
+
   llmTimeoutMs: 60_000,
   plannerTimeoutMs: 8_000,
 

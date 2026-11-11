@@ -1,6 +1,6 @@
 // One user turn, start to finish:
-//   plan (fast model) → planned searches in parallel → answer (main model,
-//   which may ask for more searches in a bounded loop) → save.
+//   recall (code) → plan (fast model) → planned searches in parallel →
+//   answer (main model, which may ask for more searches in a bounded loop) → save.
 // The HTTP layer only forwards events; scripts can call runTurn directly.
 
 import { z } from "zod";
@@ -11,8 +11,10 @@ import type { Source } from "./db";
 import { describeError, streamAnswer, type AnswerMessage, type AnswerTool } from "./llm";
 import { isIsoDate, plan, type Plan } from "./planner";
 import { SYSTEM_PROMPT, pastAnswer, renderResults, userTurn } from "./prompts";
-import { withPolicies, type SearchQuery, type SearchResult } from "./search/provider";
+import { recall } from "./recall";
+import { withPolicies, type SearchQuery } from "./search/provider";
 import { tavily } from "./search/tavily";
+import { SourceBook, citedNumbers } from "./sources";
 
 export type TurnEvent =
   | { type: "status"; text: string }
@@ -24,6 +26,7 @@ export type TurnEvent =
 
 export interface Timings {
   mode: Plan["mode"];
+  recalled: number; // past exchanges put in front of the model
   planMs: number;
   searchMs: number; // planned searches only
   searches: number; // all searches this turn, planned and model-requested
@@ -60,26 +63,6 @@ const WEB_SEARCH_TOOL: AnswerTool = {
 };
 const WebSearchInput = z.object({ query: z.string().trim().min(1), since: z.string().optional() });
 
-/** Assigns citation numbers. The same URL always keeps the same number within a turn. */
-class SourceBook {
-  private byUrl = new Map<string, Source>();
-  constructor(private last: number) {}
-
-  number(results: SearchResult[]) {
-    return results.map((r) => {
-      let s = this.byUrl.get(r.url);
-      if (!s) {
-        s = { n: ++this.last, url: r.url, title: r.title, publishedDate: r.publishedDate };
-        this.byUrl.set(r.url, s);
-      }
-      return { ...s, content: r.content };
-    });
-  }
-  all(): Source[] {
-    return [...this.byUrl.values()];
-  }
-}
-
 export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, signal: AbortSignal): Promise<void> {
   const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
@@ -92,23 +75,28 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
 
   // Read history before saving the new message so it isn't included twice.
   const history = store.recentMessages(conversationId, config.historyMessages);
-  store.addMessage(conversationId, "user", input.text, at, input.tz);
+  const userMessageId = store.addMessage(conversationId, "user", input.text, at, input.tz);
   emit({ type: "status", text: "Thinking…" });
 
   try {
     const missing = missingKeys();
     if (missing.length) throw new ConfigError(`Missing ${missing.join(", ")}. Add it to .env and restart.`);
 
-    // 1. Plan. If the planner fails we skip the pre-search; the answer model
+    // 1. Recall. Deterministic and local (a few ms), so it always runs first:
+    //    the planner needs the recalled names to write useful queries.
+    const book = new SourceBook(store.conversationSources(conversationId));
+    const memory = recall({ text: input.text, now: at, tz: input.tz, conversationId, messageId: userMessageId }, book);
+    if (memory.status) emit({ type: "status", text: memory.status });
+
+    // 2. Plan. If the planner fails we skip the pre-search; the answer model
     //    still has the tool and can search on its own, just one round later.
-    const thePlan = await plan({ text: input.text, history, now: at, tz: input.tz }, signal).catch((err): Plan => {
+    const thePlan = await plan({ text: input.text, history, memoryBlock: memory.block, now: at, tz: input.tz }, signal).catch((err): Plan => {
       if (signal.aborted) throw err;
       return { mode: "direct", queries: [] };
     });
     const planMs = elapsed();
 
-    // 2. Planned searches, all at once.
-    const book = new SourceBook(store.lastSourceNumber(conversationId));
+    // 3. Planned searches, all at once.
     let searches = 0;
     let searchBlock: string | undefined;
     if (thePlan.mode === "search") {
@@ -124,18 +112,19 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
         searchBlock = renderResults(book.number(ok.flat()));
         if (failed) searchBlock += `\n\n(${failed} of ${settled.length} searches failed and are missing above.)`;
       }
-      emit({ type: "sources", sources: book.all() });
     }
+    // Everything citable this turn: earlier sources of this conversation, sources of recalled answers, new results.
+    emit({ type: "sources", sources: book.all() });
     const searchMs = elapsed() - planMs;
 
-    // 3. Answer, with a bounded tool loop.
+    // 4. Answer, with a bounded tool loop.
     const pastSources = store.sourcesFor(history.map((m) => m.id));
     const messages: AnswerMessage[] = [
       ...history.map((m): AnswerMessage => ({
         role: m.role,
         content: m.role === "assistant" ? pastAnswer(m.content, pastSources.get(m.id) ?? []) : m.content,
       })),
-      { role: "user", content: userTurn({ text: input.text, now: at, tz: input.tz, searchBlock }) },
+      { role: "user", content: userTurn({ text: input.text, now: at, tz: input.tz, memoryBlock: memory.block, searchBlock }) },
     ];
 
     let ttftMs: number | null = null;
@@ -203,10 +192,10 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
       emit({ type: "delta", text: answer });
     }
 
-    // 4. Save the answer and the sources it actually cited.
+    // 5. Save the answer and the sources it actually cited.
     const cited = citedNumbers(answer);
     const known = book.all();
-    const timings: Timings = { mode: thePlan.mode, planMs, searchMs, searches, ttftMs, totalMs: elapsed() };
+    const timings: Timings = { mode: thePlan.mode, recalled: memory.turns.length, planMs, searchMs, searches, ttftMs, totalMs: elapsed() };
     const messageId = store.addMessage(conversationId, "assistant", answer, now(), input.tz, { timings });
     store.addSources(messageId, known.filter((s) => cited.has(s.n)));
     emit({ type: "done", conversationId, messageId, timings });
@@ -228,15 +217,6 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
 }
 
 class ConfigError extends Error {}
-
-/** Every n that appears as [n] or [n, m] in the text. */
-export function citedNumbers(text: string): Set<number> {
-  const out = new Set<number>();
-  for (const m of text.matchAll(/\[(\d+(?:\s*,\s*\d+)*)\]/g)) {
-    for (const n of m[1]!.split(",")) out.add(Number(n));
-  }
-  return out;
-}
 
 function titleFrom(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
