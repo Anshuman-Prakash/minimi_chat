@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minimi Chat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside>
+    <button id="new-chat" type="button">+ New chat</button>
+    <nav id="conversations" aria-label="Past conversations"></nav>
+  </aside>
+  <main>
+    <div id="messages" aria-live="polite">
+      <p class="empty">Ask anything. I can search the web, and I remember our past conversations by date.</p>
+    </div>
+    <form id="composer">
+      <textarea id="input" rows="1" placeholder="Message…" autofocus></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </main>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
