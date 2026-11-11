@@ -165,6 +165,6 @@ Status: the eval script was exercised end to end against faked APIs. It has not 
 
 ## Open items (not decisions)
 
-- **Not yet run against the real APIs.** Everything was built and tested without keys: unit tests for dates, recall and seeding (28), and the full turn pipeline against Anthropic and Tavily faked at the `fetch` level. Still to do with real keys: `npm run eval -- --judge`, then tune prompts and record the latency numbers.
+- **Not yet run against the real APIs.** Everything was built and tested without keys: unit tests for dates, recall and seeding (28), and the full turn pipeline against the Claude API and Tavily faked at the `fetch` level. Still to do with real keys: `npm run eval -- --judge`, then tune prompts and record the latency numbers.
 - **Latency targets are unmeasured.** If no-search answers miss ~1 s to first token, the first lever is skipping the planner for trivial messages (greetings), the second is `SEARCH_DEPTH=basic`.
 - **Things to watch in the first real run:** whether Tavily's `extract` returns usable text for JavaScript-heavy pricing pages; whether the planner sets `reverify` reliably; whether `unknownCitations` in the turn log stays at 0.

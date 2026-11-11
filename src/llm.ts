@@ -1,4 +1,4 @@
-// Thin wrapper around the Anthropic SDK: one client, one place for model settings.
+// Thin wrapper around the Claude API (official SDK, @anthropic-ai/sdk): one client, one place for model settings.
 
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
@@ -71,9 +71,9 @@ export async function fastJson<S extends z.ZodType>(args: {
 
 /** A short, user-safe description of an API failure (never includes keys or bodies). */
 export function describeError(err: unknown): string {
-  if (err instanceof Anthropic.AuthenticationError) return "The Anthropic API key is missing or invalid. Check ANTHROPIC_API_KEY in .env.";
+  if (err instanceof Anthropic.AuthenticationError) return "The Claude API key is missing or invalid. Check ANTHROPIC_API_KEY in .env.";
   if (err instanceof Anthropic.RateLimitError) return "The model is rate-limited right now. Try again in a moment.";
-  if (err instanceof Anthropic.APIConnectionError) return "Couldn't reach the model API. Check your network connection.";
-  if (err instanceof Anthropic.APIError) return `The model API returned an error (${err.status ?? "unknown"}).`;
+  if (err instanceof Anthropic.APIConnectionError) return "Couldn't reach the Claude API. Check your network connection.";
+  if (err instanceof Anthropic.APIError) return `The Claude API returned an error (${err.status ?? "unknown"}).`;
   return "Something went wrong while answering.";
 }
