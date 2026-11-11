@@ -46,7 +46,8 @@ interface Case {
 
 const mentions = (text: string, names: string[]) => names.filter((n) => text.toLowerCase().includes(n.toLowerCase())).length;
 const cites = (r: Result) => citedNumbers(r.answer).size > 0;
-const NO_RECORD = /no record|don'?t have|do not have|couldn'?t find|could not find|nothing (stored|recorded|on record)|no conversation/i;
+// ['’]: models often write a typographic apostrophe.
+const NO_RECORD = /no record|don['’]?t have|do not have|couldn['’]?t find|could not find|nothing (stored|recorded|on record)|no conversation/i;
 const CRMS = ["HubSpot", "Salesforce", "Close", "Attio", "Freshsales"];
 
 const cases: Case[] = [
@@ -80,6 +81,8 @@ const cases: Case[] = [
       ["recalled the conversation", (r.timings?.recalled ?? 0) >= 1],
       ["ran as re-verification", r.timings?.mode === "reverify"],
       ["mentions Neon and Supabase", mentions(r.answer, ["Neon", "Supabase"]) === 2],
+      // The seed quotes Neon's old $19 minimum on purpose; the live page is usage-priced.
+      ["quotes the $19 from the record and reports a change", r.answer.includes("$19") && /\bchanged\b/i.test(r.answer.replace(/unchanged/gi, ""))],
       ["has citations", cites(r)],
     ],
   },

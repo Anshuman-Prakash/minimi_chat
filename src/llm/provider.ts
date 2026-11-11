@@ -56,7 +56,16 @@ export interface AnswerSession {
 }
 
 export interface LlmProvider {
-  startAnswer(args: { system: string; messages: ChatMessage[]; tool: ToolSpec }, signal: AbortSignal): AnswerSession;
+  startAnswer(
+    args: {
+      system: string;
+      messages: ChatMessage[];
+      tool: ToolSpec;
+      /** Told when the provider has to pause, e.g. to wait out a rate limit. */
+      onNotice?: (text: string) => void;
+    },
+    signal: AbortSignal,
+  ): AnswerSession;
 
   /** One call that returns JSON matching the schema. Used for planning, fact extraction, summaries, judging. */
   json<S extends z.ZodType>(args: {

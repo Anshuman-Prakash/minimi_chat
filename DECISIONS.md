@@ -184,3 +184,30 @@ Rejected: replacing Claude outright (weaker answers on the exact behavior being 
 **D57. Known costs of the free path.** The prompts were written for Claude and are not tuned for open-weight models. Groq's gpt-oss models make one tool call per step (no parallel calls), so the planner's parallel pre-search matters more there. Free plans cap tokens per minute; a large re-verification request can be refused, which surfaces as a clear message and a `SEARCH_MAX_RESULTS` hint, not a crash. Refusal fallback and prompt caching are Claude-only.
 
 Tested offline with Groq faked at the `fetch` level: plan, search, a tool call streamed in fragments, answer, fact extraction, the JSON-mode fallback, and 429 / 413 handling. The Claude path was re-run unchanged. Neither has been run against the real service yet.
+
+## First runs against the real services (Groq free plan + Tavily)
+
+Measured from Groq's response headers: **8,000 tokens per minute and 1,000 requests per day, per model.** That number drove the next four decisions.
+
+**D58. Every request has a context budget, set per provider.** Groq: 12,000 characters for history + recalled memory + search results (about 3,000 tokens, leaving room for the system prompt and the reply inside 8,000). Claude: 400,000. Split: up to 40% memory, 20% earlier messages of the conversation, the rest search results. Anything cut carries a visible "cut here" note.
+First real eval before this: 8 of 10 cases refused as too large or rate-limited. After: all ran.
+
+**D59. When room is short, keep fewer results, not thinner ones.** First version gave every result an equal slice, which came to ~350 characters each on Groq: too little to contain a price. The CRM re-check then verified 1 tool of 5. Now each kept result gets at least 700 characters and the count drops instead; re-fetched pages come first, then the top hit of each query before any query's second hit. Same question after the change: 5 of 5 verified.
+
+**D60. Re-fetched pages are queried for what was claimed, not for the user's sentence.** Tavily's `extract` returns the passages matching a query. The query is now built from the recorded claims ("Salesforce Pro Suite price, Close Growth price, …"), so the passage that comes back is the one with the number in it.
+
+**D61. On a rate-limit response, wait and continue.** Groq's 429 says how many seconds until there is room. The provider waits (up to 65 s, up to 3 times) and the UI shows "Continuing in N s…". A slow answer beats a failed turn; on Claude this path is off.
+
+**D62. Prompt changes forced by a real model's behavior.**
+- It searched for the capital of Australia although the planner said no search was needed. The prompt now says: no `<search_results>` block means the application judged none was needed.
+- It filled the "Then" column from today's page, so the deliberately stale Neon price went unnoticed. The prompt now says: one row per recorded fact, Then copied word for word from the record, Now only from today's results. After this the same question reports Neon as Changed ($19 a month → usage-based) and both Supabase facts as Unchanged. The eval has a check for exactly this.
+- It put commentary in the Status cell; the cell must now hold only the status word.
+
+**D63. Citation format is normalised in the provider.** Groq's gpt-oss models write citations as `【3†L1-L4】` regardless of instructions. The OpenAI-compatible provider rewrites them to `[3]` as the text streams, holding back a marker that is still open at a chunk boundary. It lives in the provider because it is that model family's quirk, not the app's.
+
+**Measured (Groq free plan, one run each, not percentiles):** plain fact 1.6 s to first word; the three sample questions 6.7 s, 7.5 s and 10 s total when the per-minute allowance was free, and up to 76 s when a turn had to wait for it. The 1 s / 6–8 s targets are met only without rate-limit waits. Not yet measured on Claude.
+
+## Interface
+
+**D64. The UI uses projectminimi.com's palette and type** (black, white at reduced opacity, faint white panels, sky blue `#6EC2FF`, orange `#FF8133`; Roboto, Geist Mono, Pixelify Sans), read from the site's own CSS. Colors and fonts only; no logo or artwork.
+Additions that serve the product, not decoration: an empty state with the sample questions as one-click cards; a pulsing status line for each stage; Changed / Unchanged / Couldn't verify shown as coloured badges in then-vs-now tables; a meta line with exchanges recalled, searches and timings; the open conversation kept in the URL so a reload returns to it; a slide-in sidebar on narrow screens. Still plain HTML, CSS and JS with no build step.

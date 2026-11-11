@@ -14,17 +14,29 @@ class HttpError extends Error {
   }
 }
 
-async function post(body: object, signal: AbortSignal | undefined, timeoutMs: number): Promise<Response> {
+async function post(body: object, signal: AbortSignal | undefined, timeoutMs: number, onWait?: (seconds: number) => void): Promise<Response> {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new HttpError(401);
-  const res = await fetch(`${config.openAiBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) throw new HttpError(res.status);
-  return res;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${config.openAiBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+    });
+    if (res.ok) return res;
+
+    // Free plans meter tokens per minute. The service says how long until there
+    // is room again; waiting that long beats failing the whole turn.
+    const waitMs = Number(res.headers.get("retry-after")) * 1000;
+    if (res.status === 429 && attempt < 3 && waitMs > 0 && waitMs <= config.rateLimitWaitMs) {
+      onWait?.(Math.ceil(waitMs / 1000));
+      await new Promise((resolve) => setTimeout(resolve, waitMs + 500));
+      if (signal?.aborted) throw new HttpError(429);
+      continue;
+    }
+    throw new HttpError(res.status);
+  }
 }
 
 // Groq's gpt-oss models always reason; "low" is their shortest setting. Other
@@ -42,7 +54,7 @@ type WireMessage =
   | { role: "tool"; tool_call_id: string; content: string };
 
 export const openAiCompatible: LlmProvider = {
-  startAnswer({ system, messages: history, tool }, signal): AnswerSession {
+  startAnswer({ system, messages: history, tool, onNotice }, signal): AnswerSession {
     const messages: WireMessage[] = [{ role: "system", content: system }, ...history.map((m): WireMessage => ({ role: m.role, content: m.content }))];
 
     return {
@@ -52,15 +64,20 @@ export const openAiCompatible: LlmProvider = {
             model: config.answerModel,
             messages,
             tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } }],
-            max_completion_tokens: config.openAiMaxTokens,
+            max_completion_tokens: config.answerMaxTokens,
             stream: true,
             ...reasoning(config.answerModel),
           },
           signal,
           config.llmTimeoutMs,
+          (seconds) => onNotice?.(`The free model plan is at its per-minute limit. Continuing in ${seconds} s…`),
         );
 
         let text = "";
+        const emit = citationNormalizer((clean) => {
+          text += clean;
+          onText(clean);
+        });
         let finish = "stop";
         let usage: { prompt_tokens?: number; completion_tokens?: number } = {};
         const calls: WireToolCall[] = [];
@@ -81,10 +98,7 @@ export const openAiCompatible: LlmProvider = {
             const choice = chunk.choices?.[0];
             if (!choice) continue;
             if (choice.finish_reason) finish = choice.finish_reason;
-            if (choice.delta?.content) {
-              text += choice.delta.content;
-              onText(choice.delta.content);
-            }
+            if (choice.delta?.content) emit.push(choice.delta.content);
             // Tool calls may arrive whole or in fragments (id and name first, then pieces of the arguments).
             for (const [position, part] of (choice.delta?.tool_calls ?? []).entries()) {
               const call = (calls[part.index ?? position] ??= { id: "", type: "function", function: { name: "", arguments: "" } });
@@ -95,6 +109,7 @@ export const openAiCompatible: LlmProvider = {
           }
         }
 
+        emit.flush();
         const made = calls.filter(Boolean);
         if (made.length) messages.push({ role: "assistant", content: text || null, tool_calls: made });
         return {
@@ -138,7 +153,7 @@ export const openAiCompatible: LlmProvider = {
   describeError(err) {
     if (err instanceof HttpError) {
       if (err.status === 401) return "The model API key is missing or invalid. Check GROQ_API_KEY in .env.";
-      if (err.status === 429) return "The model service's rate limit was reached (free plans have low per-minute limits). Wait a minute and try again.";
+      if (err.status === 429) return "The model service's rate limit was reached (free plans allow a fixed number of tokens per minute and requests per day). Wait a minute and try again.";
       if (err.status === 413) return "This request was too large for the model service's plan. Try SEARCH_MAX_RESULTS=3 in .env, or a shorter conversation.";
       return `The model API returned an error (${err.status}).`;
     }
@@ -147,6 +162,30 @@ export const openAiCompatible: LlmProvider = {
     return "Something went wrong while answering.";
   },
 };
+
+/**
+ * Some open-weight models (gpt-oss) cite in their training format, 【3†L1-L4】,
+ * whatever the prompt says. This rewrites those to the app's [3] as text streams
+ * through, holding back a marker that is still open at the end of a chunk.
+ */
+function citationNormalizer(out: (text: string) => void) {
+  let held = "";
+  const clean = (s: string) => s.replace(/【(\d+)[^】]*】/g, "[$1]");
+  return {
+    push(delta: string) {
+      const all = held + delta;
+      const open = all.lastIndexOf("【");
+      const unfinished = open !== -1 && !all.includes("】", open) && all.length - open < 40;
+      held = unfinished ? all.slice(open) : "";
+      const ready = clean(unfinished ? all.slice(0, open) : all);
+      if (ready) out(ready);
+    },
+    flush() {
+      if (held) out(clean(held));
+      held = "";
+    },
+  };
+}
 
 function parseJson(text: string): unknown {
   try {

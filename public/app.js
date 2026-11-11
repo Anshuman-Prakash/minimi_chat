@@ -1,12 +1,18 @@
-// Minimal chat client: posts a message, reads the SSE reply, renders markdown
-// with clickable [n] citations and a source list under each answer.
+// Chat client: posts a message, reads the SSE reply, renders markdown with
+// clickable [n] citations, a source list, and status badges in then/now tables.
 
 const $ = (id) => document.getElementById(id);
 const messagesEl = $("messages");
 const inputEl = $("input");
 const sendBtn = document.querySelector("#composer button");
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const EMPTY = `<p class="empty">Ask anything. I can search the web, and I remember our past conversations by date.</p>`;
+
+const SUGGESTIONS = [
+  ["Check a past answer", "What did I ask you on 3 November? Is your answer still correct today?"],
+  ["What changed since", "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?"],
+  ["Search the web", "What's the latest stable release of Node.js, and when did it come out?"],
+  ["Test my memory", "What did I ask you on 1 January?"],
+];
 
 let conversationId = null;
 let busy = false;
@@ -14,6 +20,27 @@ let busy = false;
 const formatTime = (iso) =>
   new Date(iso).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } };
+const scrollDown = () => { messagesEl.scrollTop = messagesEl.scrollHeight; };
+
+function showEmpty() {
+  messagesEl.innerHTML = `
+    <div class="empty">
+      <h1>Ask now. Ask again <em>later</em>.</h1>
+      <p>I search the web when a question needs it, and I remember what we discussed and when, so you can ask whether it is still true.</p>
+      <div class="suggestions"></div>
+    </div>`;
+  messagesEl.querySelector(".suggestions").append(
+    ...SUGGESTIONS.map(([label, text]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.innerHTML = "<b></b>";
+      b.firstChild.textContent = label;
+      b.append(text);
+      b.onclick = () => { if (!busy) send(text); };
+      return b;
+    }),
+  );
+}
 
 /** Renders an assistant answer: sanitized markdown, [n] turned into links, cited sources listed below. */
 function renderAnswer(el, text, sources) {
@@ -51,8 +78,18 @@ function renderAnswer(el, text, sources) {
     node.replaceWith(frag);
   }
 
-  const list = el.querySelector(".sources");
-  list.replaceChildren(
+  // In a then-vs-now table, turn the status words into coloured badges.
+  for (const td of body.querySelectorAll("td")) {
+    const word = td.textContent.trim().toLowerCase().replace(/[’`]/g, "'");
+    const kind = word === "changed" ? "changed" : word === "unchanged" ? "unchanged" : word === "couldn't verify" ? "unverified" : null;
+    if (!kind) continue;
+    const badge = document.createElement("span");
+    badge.className = `badge ${kind}`;
+    badge.textContent = td.textContent.trim();
+    td.replaceChildren(badge);
+  }
+
+  el.querySelector(".sources").replaceChildren(
     ...[...cited.values()].sort((a, b) => a.n - b.n).map((s) => {
       const a = document.createElement("a");
       a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer";
@@ -72,21 +109,22 @@ function addMessage(role, text, createdAt, sources = []) {
   else renderAnswer(el, text, sources);
   if (createdAt) el.querySelector(".time").textContent = formatTime(createdAt);
   messagesEl.append(el);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  scrollDown();
   return el;
 }
 
 async function loadConversations() {
   const list = await (await fetch("/api/conversations")).json();
-  $("conversations").replaceChildren(
+  const nav = $("conversations");
+  if (!list.length) { nav.innerHTML = `<div class="none">Nothing yet. Your chats will be listed here.</div>`; return; }
+  nav.replaceChildren(
     ...list.map((c) => {
       const a = document.createElement("a");
       a.href = "#";
-      a.textContent = c.title;
       a.className = c.id === conversationId ? "active" : "";
-      const when = document.createElement("small");
-      when.textContent = formatTime(c.created_at);
-      a.append(when);
+      a.innerHTML = `<span class="title"></span><small></small>`;
+      a.firstChild.textContent = c.title;
+      a.lastChild.textContent = formatTime(c.created_at);
       a.onclick = (e) => { e.preventDefault(); openConversation(c.id); };
       return a;
     }),
@@ -95,17 +133,26 @@ async function loadConversations() {
 
 async function openConversation(id) {
   if (busy) return;
-  conversationId = id;
+  document.body.classList.remove("menu-open");
+  const res = await fetch(`/api/conversations/${id}/messages`);
+  if (!res.ok) return newChat(); // e.g. a stale link to a conversation that no longer exists
+  setConversation(id);
   messagesEl.replaceChildren();
-  const rows = await (await fetch(`/api/conversations/${id}/messages`)).json();
-  for (const m of rows) addMessage(m.role, m.content, m.created_at, m.sources);
+  for (const m of await res.json()) addMessage(m.role, m.content, m.created_at, m.sources);
   loadConversations();
+}
+
+/** The open conversation is kept in the address bar, so a reload returns to it. */
+function setConversation(id) {
+  conversationId = id;
+  history.replaceState(null, "", id ? `#c${id}` : location.pathname);
 }
 
 function newChat() {
   if (busy) return;
-  conversationId = null;
-  messagesEl.innerHTML = EMPTY;
+  document.body.classList.remove("menu-open");
+  setConversation(null);
+  showEmpty();
   loadConversations();
   inputEl.focus();
 }
@@ -115,8 +162,13 @@ async function send(text) {
   sendBtn.disabled = true;
   addMessage("user", text, new Date().toISOString());
   const el = addMessage("assistant", "");
+  el.classList.add("working");
   const body = el.querySelector(".body");
-  const showStatus = (s) => { body.innerHTML = `<span class="status"></span>`; body.firstChild.textContent = s; };
+  const showStatus = (s) => {
+    body.innerHTML = `<span class="status"><i class="dot"></i><span></span></span>`;
+    body.querySelector(".status span").textContent = s;
+    scrollDown();
+  };
   showStatus("Thinking…");
 
   let answer = "";
@@ -126,7 +178,7 @@ async function send(text) {
   const render = () => {
     renderQueued = false;
     if (answer) renderAnswer(el, answer, sources);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollDown();
   };
   const queueRender = () => { if (!renderQueued) { renderQueued = true; requestAnimationFrame(render); } }; // at most one render per frame
 
@@ -136,13 +188,18 @@ async function send(text) {
     if (event === "delta") { answer += data.text; queueRender(); }
     if (event === "reset") { answer = ""; showStatus(status); }
     if (event === "done") {
-      conversationId = data.conversationId;
+      setConversation(data.conversationId);
       const t = data.timings;
-      const search = t.searches ? ` · ${t.searches} search${t.searches > 1 ? "es" : ""}` : "";
-      el.querySelector(".time").textContent = `${formatTime(new Date().toISOString())} · first token ${t.ttftMs ?? "–"} ms · total ${t.totalMs} ms${search}`;
+      const seconds = (ms) => `${(ms / 1000).toFixed(1)} s`;
+      const parts = [formatTime(new Date().toISOString())];
+      if (t.recalled) parts.push(`${t.recalled} past exchange${t.recalled > 1 ? "s" : ""} recalled`);
+      if (t.searches) parts.push(`${t.searches} search${t.searches > 1 ? "es" : ""}`);
+      if (t.ttftMs != null) parts.push(`first word ${seconds(t.ttftMs)}`);
+      parts.push(`total ${seconds(t.totalMs)}`);
+      el.querySelector(".time").textContent = parts.join(" · ");
     }
     if (event === "error") {
-      conversationId = data.conversationId;
+      setConversation(data.conversationId);
       answer = "";
       body.innerHTML = `<span class="error"></span>`;
       body.firstChild.textContent = data.message;
@@ -176,6 +233,7 @@ async function send(text) {
   } catch (err) {
     handle("error", { message: `Connection problem: ${err.message}`, conversationId });
   } finally {
+    el.classList.remove("working");
     busy = false;
     sendBtn.disabled = false;
     loadConversations();
@@ -199,5 +257,9 @@ inputEl.addEventListener("input", () => {
   inputEl.style.height = `${inputEl.scrollHeight}px`;
 });
 $("new-chat").addEventListener("click", newChat);
+$("menu").addEventListener("click", () => document.body.classList.toggle("menu-open"));
+messagesEl.addEventListener("click", () => document.body.classList.remove("menu-open"));
 
-loadConversations();
+const linked = Number(/^#c(\d+)$/.exec(location.hash)?.[1]);
+if (linked) openConversation(linked);
+else { showEmpty(); loadConversations(); }

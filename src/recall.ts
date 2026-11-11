@@ -18,6 +18,8 @@ export interface Recall {
   turns: Turn[];
   /** Pages the recalled answers cited: what to re-fetch when the user asks "is it still true?". */
   citedUrls: string[];
+  /** What those answers claimed, as short phrases ("Neon Launch plan price"): what to look for on the re-fetched pages. */
+  claimTopics: string[];
 }
 
 // A date only triggers a lookup when the message is about the user and the
@@ -61,11 +63,12 @@ export function recall(
   const sections: string[] = [];
   const turns: Turn[] = [];
   const cited = new Set<string>();
+  const topics = new Set<string>();
   const render = (t: Turn[]) => {
     turns.push(...t);
-    return t.map((turn) => renderTurn(turn, args.tz, book, cited)).join("\n\n");
+    return t.map((turn) => renderTurn(turn, args.tz, book, cited, topics)).join("\n\n");
   };
-  const result = (status: string): Recall => ({ block: sections.join("\n\n"), status, turns, citedUrls: [...cited] });
+  const result = (status: string): Recall => ({ block: sections.join("\n\n"), status, turns, citedUrls: [...cited], claimTopics: [...topics] });
 
   if (refs.length) {
     const labels: string[] = [];
@@ -93,7 +96,7 @@ export function recall(
     return result("Checking my notes…");
   }
 
-  return { block: null, status: null, turns: [], citedUrls: [] };
+  return { block: null, status: null, turns: [], citedUrls: [], claimTopics: [] };
 }
 
 interface DateLookup {
@@ -183,7 +186,7 @@ function describeDateLookup(ref: TemporalRef, found: DateLookup, words: string[]
   return `${head}\n${scope}\n\n${render(found.turns)}`;
 }
 
-function renderTurn(turn: Turn, tz: string, book: SourceBook, cited: Set<string>): string {
+function renderTurn(turn: Turn, tz: string, book: SourceBook, cited: Set<string>, topics: Set<string>): string {
   const when = formatLocal(new Date(turn.question.created_at), tz);
   const lines = [`--- Past exchange · ${when} (${tz}) · conversation "${turn.title}"`, `User asked: ${clip(turn.question.content)}`];
   if (!turn.answer) {
@@ -213,6 +216,7 @@ function renderTurn(turn: Turn, tz: string, book: SourceBook, cited: Set<string>
       }
     }
     // Pages behind recorded facts first, then the rest of what the answer cited.
+    for (const c of facts.claims) topics.add(`${c.entity} ${c.attribute}`);
     for (const c of facts.claims) if (c.sourceUrl) cited.add(c.sourceUrl);
     for (const s of renumbered) cited.add(s.url);
   }
