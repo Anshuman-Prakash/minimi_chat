@@ -12,6 +12,7 @@ export function anthropic(): Anthropic {
 }
 
 export type AnswerMessage = Anthropic.Beta.BetaMessageParam;
+export type AnswerTool = Anthropic.Beta.BetaTool;
 
 /**
  * Starts a streaming answer from the main model.
@@ -21,13 +22,14 @@ export type AnswerMessage = Anthropic.Beta.BetaMessageParam;
  *   re-runs it on a fallback model inside the same call instead of dead-ending.
  *   This is the only reason the beta namespace is used.
  */
-export function streamAnswer(args: { system: string; messages: AnswerMessage[] }, signal: AbortSignal) {
+export function streamAnswer(args: { system: string; messages: AnswerMessage[]; tools: AnswerTool[] }, signal: AbortSignal) {
   return anthropic().beta.messages.stream(
     {
       model: config.answerModel,
       max_tokens: config.answerMaxTokens,
       system: [{ type: "text", text: args.system, cache_control: { type: "ephemeral" } }],
       messages: args.messages,
+      tools: args.tools,
       thinking: { type: "adaptive" },
       output_config: { effort: config.answerEffort },
       betas: ["server-side-fallback-2026-07-01"],

@@ -26,8 +26,24 @@ export const config = {
   historyMessages: 20,
 
   llmTimeoutMs: 60_000,
+  plannerTimeoutMs: 8_000,
+
+  // Search
+  searchDepth: (env.SEARCH_DEPTH ?? "advanced") as "fast" | "basic" | "advanced",
+  searchMaxResults: 5,
+  searchTimeoutMs: 8_000,
+  searchCacheTtlMs: 10 * 60_000,
+  maxPlannedQueries: 5,
+  // Extra rounds of web_search the answer model may ask for after the planned searches.
+  maxToolRounds: 2,
 };
 
+/** Keys the app cannot answer without. */
 export function missingKeys(): string[] {
   return ["ANTHROPIC_API_KEY"].filter((k) => !process.env[k]);
+}
+
+/** Keys worth warning about at startup. Without Tavily the app still answers, but cannot search. */
+export function unsetKeys(): string[] {
+  return ["ANTHROPIC_API_KEY", "TAVILY_API_KEY"].filter((k) => !process.env[k]);
 }

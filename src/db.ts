@@ -34,6 +34,18 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS messages_by_time ON messages(created_at);
   CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation_id, id);
+
+  -- The web sources an assistant message cited. n is the [n] used in the text
+  -- and is unique within a conversation, so a citation is never ambiguous.
+  CREATE TABLE IF NOT EXISTS sources (
+    id             INTEGER PRIMARY KEY,
+    message_id     INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    n              INTEGER NOT NULL,
+    url            TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    published_date TEXT              -- YYYY-MM-DD or NULL
+  );
+  CREATE INDEX IF NOT EXISTS sources_by_message ON sources(message_id);
 `);
 
 export type Role = "user" | "assistant";
@@ -76,6 +88,41 @@ export function addMessage(conversationId: number, role: Role, content: string, 
 
 export function getMessages(conversationId: number): MessageRow[] {
   return db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY id").all(conversationId) as unknown as MessageRow[];
+}
+
+export interface Source {
+  n: number;
+  url: string;
+  title: string;
+  publishedDate: string | null;
+}
+
+export function addSources(messageId: number, sources: Source[]): void {
+  const insert = db.prepare("INSERT INTO sources (message_id, n, url, title, published_date) VALUES (?, ?, ?, ?, ?)");
+  for (const s of sources) insert.run(messageId, s.n, s.url, s.title, s.publishedDate);
+}
+
+/** Sources for a set of messages, grouped by message id. */
+export function sourcesFor(messageIds: number[]): Map<number, Source[]> {
+  const out = new Map<number, Source[]>();
+  if (!messageIds.length) return out;
+  const rows = db
+    .prepare(`SELECT message_id, n, url, title, published_date FROM sources WHERE message_id IN (${messageIds.map(() => "?").join(",")}) ORDER BY n`)
+    .all(...messageIds) as unknown as { message_id: number; n: number; url: string; title: string; published_date: string | null }[];
+  for (const r of rows) {
+    const list = out.get(r.message_id) ?? [];
+    list.push({ n: r.n, url: r.url, title: r.title, publishedDate: r.published_date });
+    out.set(r.message_id, list);
+  }
+  return out;
+}
+
+/** Highest citation number used so far in a conversation (0 if none). */
+export function lastSourceNumber(conversationId: number): number {
+  const row = db
+    .prepare("SELECT MAX(s.n) AS n FROM sources s JOIN messages m ON m.id = s.message_id WHERE m.conversation_id = ?")
+    .get(conversationId) as { n: number | null } | undefined;
+  return row?.n ?? 0;
 }
 
 /** The last `limit` messages of a conversation, oldest first. */

@@ -60,3 +60,30 @@ Rejected: letting the answer model drive every search (slower first round); mult
 **D18. Logging: one JSON line per turn with timings and token counts.** No message content, no keys.
 
 **D19. Markdown rendering: `marked` + `DOMPurify` from cdnjs.** Model output is sanitized before it touches the DOM. A CDN is acceptable because the app needs the internet anyway.
+
+## Phase 2: web search and citations
+
+**D20. `SearchProvider` is a two-method interface: `search(query, since?)` and `extract(urls, focus)`.** Tavily implements it in ~60 lines of plain `fetch`. `withPolicies()` wraps any provider with the rules every external call gets: 8 s timeout, one retry on network errors / 429 / 5xx (never on 4xx, where a retry can't help), and a 10-minute in-memory cache keyed by query + date filter. The cache stores the promise, so two identical lookups in flight share one request, and failures are never cached.
+
+**D21. Tavily `search_depth: "advanced"` with 3 chunks per source.** One call returns the passages of each page that match the query, so we get page content without a second "fetch the page" hop. Costs 2 credits instead of 1 and is slower than `basic`; `SEARCH_DEPTH` makes it switchable once measured. `extract` is reserved for re-fetching known URLs (Phase 4).
+
+**D22. The planner returns `{ mode: direct | search, queries[] }` via structured output.** The fast model runs with thinking off and a strict JSON schema, so there is nothing to parse by hand. It only sees today's date, the last four messages (clipped) and the new message.
+If the planner fails or times out we do not fail the turn and do not guess a query: we skip the pre-search. The answer model still has the tool and will search by itself, one round later. Slower, never wrong.
+
+**D23. "direct" means "no pre-search", not "search forbidden".** The answer model always has `web_search`. The planner is an optimisation for latency; the answer model is the safety net for the planner's mistakes.
+
+**D24. Bounded tool loop: at most 2 extra rounds, enforced in the tool result, plus a hard stop.** The tool list must stay identical across requests inside a turn (changing it invalidates the model's replayed thinking blocks), so the budget can't be enforced by removing the tool. Instead an over-budget call gets an error result telling the model to answer with what it has. If it still asks again, the loop stops and the user gets a plain "ran out of search attempts" message. Found by testing against a fake model that never stops asking.
+
+**D25. Citation numbers are issued by code and are unique per conversation.** `SourceBook` gives each URL one number, continuing from the highest number already used in the conversation, so `[7]` never means two different pages in one thread. Only sources the answer actually cites are stored. The UI links only numbers that exist; an unknown number stays plain text and is counted in the turn log (`unknownCitations`) as a quality signal.
+
+**D26. Preamble is discarded with a `reset` event.** If the model streams "Let me check…" and then calls the tool, the UI clears that text and shows the search status again. The stored answer is the text of the final round only.
+
+**D27. Pre-fetched results go into the user turn as a `<search_results>` block**, not as a faked tool call. Fabricating assistant tool-use turns the model never made is fragile; a labeled block is simple and the prompt explains it.
+
+**D28. Search results are treated as untrusted.** The system prompt says web content is not instructions. Model output is sanitized before rendering.
+
+**D29. Not using `strict` tools or eager input streaming.** The tool input is a one-line query; we validate it with zod before running anything, and an invalid call gets an error result the model can correct.
+
+**D30. A missing Tavily key degrades, a missing Anthropic key stops.** Without search the app says it could not check the web and answers with that caveat.
+
+Tested offline by faking both APIs at the `fetch` level: planned + model-requested searches, a follow-up turn, provider outage (one retry, then degrade), runaway tool loop. Not yet tested against the real APIs (no keys on the build machine).

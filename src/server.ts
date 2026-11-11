@@ -7,7 +7,7 @@ import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { runTurn } from "./agent";
 import { isValidTz } from "./clock";
-import { config, missingKeys } from "./config";
+import { config, unsetKeys } from "./config";
 import * as store from "./db";
 
 const app = new Hono();
@@ -41,15 +41,16 @@ app.get("/api/conversations", (c) => c.json(store.listConversations()));
 app.get("/api/conversations/:id/messages", (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isInteger(id) || !store.conversationExists(id)) return c.json({ error: "Not found" }, 404);
-  const messages = store.getMessages(id).map(({ id, role, content, created_at }) => ({ id, role, content, created_at }));
-  return c.json(messages);
+  const rows = store.getMessages(id);
+  const sources = store.sourcesFor(rows.map((m) => m.id));
+  return c.json(rows.map((m) => ({ id: m.id, role: m.role, content: m.content, created_at: m.created_at, sources: sources.get(m.id) ?? [] })));
 });
 
 app.use("/*", serveStatic({ root: "./public" }));
 
 serve({ fetch: app.fetch, port: config.port }, ({ port }) => {
   console.log(`Chat is running at http://localhost:${port}`);
-  const missing = missingKeys();
-  if (missing.length) console.warn(`Warning: ${missing.join(", ")} not set. Copy .env.example to .env and fill it in.`);
+  const unset = unsetKeys();
+  if (unset.length) console.warn(`Warning: ${unset.join(", ")} not set. Copy .env.example to .env and fill it in.`);
   if (config.nowOverride) console.log(`NOW_OVERRIDE active: the app believes it is ${config.nowOverride}`);
 });
