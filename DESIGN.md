@@ -10,9 +10,11 @@ One Node process: Hono serves a small HTML/JS UI and an SSE chat endpoint; SQLit
 
 1. **Resolve dates, in code.** `chrono-node` finds date phrases; my own rules turn them into ranked candidate days in the user's timezone ("last Tuesday" said on a Wednesday is yesterday, or the Tuesday before).
 2. **Recall, in code.** SQLite is queried by day window and topic words (FTS5). When a phrase has two readings, the day whose conversation best matches the topic wins, and the model is told which was used. It receives the past exchange with its timestamp, cited sources and stated facts, or an explicit `NO RECORD FOUND`.
-3. **Plan.** A fast model (Haiku) returns structured output: search or not, the queries, and whether this is a "still true?" question.
+3. **Plan.** A small fast model returns structured output: search or not, the queries, and whether this is a "still true?" question.
 4. **Search in parallel**, through a provider interface (Tavily; timeout, one retry, short cache). For "still true?" questions the pages the old answer cited are fetched again, so then and now are compared on the same source.
-5. **Answer.** Sonnet streams the reply with numbered citations and may search again, at most two more rounds. Afterwards a background step records the entities and checkable facts in the reply.
+5. **Answer.** The main model streams the reply with numbered citations and may search again, at most two more rounds. Afterwards a background step records the entities and checkable facts in the reply.
+
+The model sits behind a three-method interface with two implementations: Claude (Sonnet to answer, Haiku to plan), which the prompts were written for, and any OpenAI-compatible service, defaulting to Groq's free tier so the project can be run at no cost.
 
 ## Why this way
 

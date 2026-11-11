@@ -6,7 +6,7 @@ import { z } from "zod";
 import { formatLocal } from "./clock";
 import { config } from "./config";
 import type { MessageRow } from "./db";
-import { fastJson } from "./llm";
+import { llm } from "./llm/provider";
 import type { SearchQuery } from "./search/provider";
 
 const PlanSchema = z.object({
@@ -54,7 +54,7 @@ export async function plan(
     .map((m) => `${m.role}: ${clip(m.content, 600)}`)
     .join("\n");
 
-  const parsed = await fastJson({
+  const parsed = await llm().json({
     schema: PlanSchema,
     system: PLANNER_SYSTEM,
     user: `Today is ${formatLocal(args.now, args.tz)} (${args.tz}).

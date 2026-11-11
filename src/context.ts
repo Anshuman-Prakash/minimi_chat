@@ -5,7 +5,7 @@ import { z } from "zod";
 import { config } from "./config";
 import * as store from "./db";
 import type { MessageRow } from "./db";
-import { fastJson } from "./llm";
+import { llm } from "./llm/provider";
 
 export interface ConversationContext {
   summary: string | null;
@@ -37,7 +37,7 @@ export async function updateSummary(conversationId: number): Promise<void> {
   if (messages.length < config.historyMessages + config.summarizeEvery) return;
 
   const older = messages.slice(0, messages.length - config.historyMessages);
-  const { summary } = await fastJson({
+  const { summary } = await llm().json({
     schema: SummarySchema,
     system: SUMMARY_SYSTEM,
     user: `<existing_notes>\n${existing?.text ?? "(none yet)"}\n</existing_notes>\n\n<new_messages>\n${older.map((m) => `${m.role}: ${m.content}`).join("\n\n")}\n</new_messages>`,

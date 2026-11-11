@@ -13,7 +13,7 @@ for (const suffix of ["", "-wal", "-shm"]) rmSync(`data/eval.db${suffix}`, { for
 const { runTurn } = await import("../src/agent");
 const { now } = await import("../src/clock");
 const { config, unsetKeys } = await import("../src/config");
-const { anthropic } = await import("../src/llm");
+const { llm } = await import("../src/llm/provider");
 const { citedNumbers } = await import("../src/sources");
 const { seed } = await import("./seed-data");
 type Timings = import("../src/agent").Timings;
@@ -178,14 +178,14 @@ const JudgeSchema = z.object({
 });
 
 async function judge(c: Case, r: Result) {
-  const res = await anthropic().messages.parse({
-    model: config.answerModel,
-    max_tokens: 2000,
-    output_config: { effort: "low", format: (await import("@anthropic-ai/sdk/helpers/zod")).zodOutputFormat(JudgeSchema) },
+  return llm().json({
+    schema: JudgeSchema,
+    tier: "answer",
+    think: true,
+    timeoutMs: 60_000,
     system: "You grade answers from a chat assistant that has web search and a memory of past conversations. Grade strictly against the expected behavior. You cannot check live facts; grade behavior, not whether a price is right.",
-    messages: [{ role: "user", content: `<question>\n${c.messages.at(-1)}\n</question>\n\n<expected_behavior>\n${c.expect}\n</expected_behavior>\n\n<answer>\n${r.answer}\n</answer>` }],
+    user: `<question>\n${c.messages.at(-1)}\n</question>\n\n<expected_behavior>\n${c.expect}\n</expected_behavior>\n\n<answer>\n${r.answer}\n</answer>`,
   });
-  return res.parsed_output;
 }
 
 const args = process.argv.slice(2);
@@ -193,7 +193,7 @@ const only = args.includes("--only") ? args[args.indexOf("--only") + 1] : null;
 const useJudge = args.includes("--judge");
 const selected = cases.filter((c) => !only || c.name.includes(only));
 
-console.log(`Eval: ${selected.length} cases · now = ${today.toFormat("cccc d LLLL yyyy, HH:mm")} (${tz}) · answer model ${config.answerModel} · fast model ${config.fastModel}\n`);
+console.log(`Eval: ${selected.length} cases · now = ${today.toFormat("cccc d LLLL yyyy, HH:mm")} (${tz}) · provider ${config.llmProvider} · answer model ${config.answerModel} · fast model ${config.fastModel}\n`);
 
 const rows: Record<string, string | number>[] = [];
 let failures = 0;

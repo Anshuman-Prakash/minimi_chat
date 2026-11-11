@@ -6,7 +6,7 @@
 import { z } from "zod";
 import * as store from "./db";
 import type { Source } from "./db";
-import { fastJson } from "./llm";
+import { llm } from "./llm/provider";
 
 const FactsSchema = z.object({
   entities: z.array(
@@ -35,7 +35,7 @@ Leave out opinions, recommendations, definitions, and anything that cannot chang
 export async function recordFacts(args: { messageId: number; question: string; answer: string; observedAt: string; sources: Source[] }): Promise<void> {
   if (args.answer.length < 80) return; // greetings and one-liners have nothing to index
 
-  const facts = await fastJson({
+  const facts = await llm().json({
     schema: FactsSchema,
     system: FACTS_SYSTEM,
     user: `<question>\n${args.question}\n</question>\n\n<answer>\n${args.answer}\n</answer>`,

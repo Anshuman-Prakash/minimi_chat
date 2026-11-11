@@ -10,7 +10,7 @@ import { loadContext, updateSummary } from "./context";
 import * as store from "./db";
 import type { Source } from "./db";
 import { recordFacts } from "./facts";
-import { describeError, streamAnswer, type AnswerMessage, type AnswerTool } from "./llm";
+import { llm, type ChatMessage, type Round, type ToolResult, type ToolSpec } from "./llm/provider";
 import { isIsoDate, plan, type Plan } from "./planner";
 import { SYSTEM_PROMPT, pastAnswer, renderResults, userTurn } from "./prompts";
 import { recall } from "./recall";
@@ -46,12 +46,12 @@ const search = withPolicies(tavily);
 
 // The one tool. No `strict`/eager streaming: the input is a one-line query,
 // and we validate it ourselves before running anything.
-const WEB_SEARCH_TOOL: AnswerTool = {
+const WEB_SEARCH_TOOL: ToolSpec = {
   name: "web_search",
   description:
     "Search the web and get back numbered sources with the relevant text from each page. " +
     "Call it several times in one step for independent lookups; they run in parallel.",
-  input_schema: {
+  parameters: {
     type: "object",
     properties: {
       query: { type: "string", description: "Focused search query" },
@@ -148,8 +148,8 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
 
     // 4. Answer, with a bounded tool loop.
     const pastSources = store.sourcesFor(history.map((m) => m.id));
-    const messages: AnswerMessage[] = [
-      ...history.map((m): AnswerMessage => ({
+    const messages: ChatMessage[] = [
+      ...history.map((m): ChatMessage => ({
         role: m.role,
         content: m.role === "assistant" ? pastAnswer(m.content, pastSources.get(m.id) ?? []) : m.content,
       })),
@@ -158,17 +158,16 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
 
     let ttftMs: number | null = null;
     let rounds = 0;
-    let final;
+    let final: Round;
+    const session = llm().startAnswer({ system: SYSTEM_PROMPT, messages, tool: WEB_SEARCH_TOOL }, signal);
     for (;;) {
-      const stream = streamAnswer({ system: SYSTEM_PROMPT, messages, tools: [WEB_SEARCH_TOOL] }, signal);
-      stream.on("text", (delta) => {
+      final = await session.next((delta) => {
         ttftMs ??= elapsed();
         emit({ type: "delta", text: delta });
       });
-      final = await stream.finalMessage();
 
-      const calls = final.content.filter((b) => b.type === "tool_use");
-      if (final.stop_reason !== "tool_use" || !calls.length) break;
+      const calls = final.toolCalls;
+      if (final.stop !== "tool_use" || !calls.length) break;
       // Hard stop: the model was already told the budget is used up and asked again anyway.
       if (rounds > config.maxToolRounds) break;
 
@@ -192,29 +191,27 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
       searches += toRun.length;
 
       const results = await Promise.all(
-        requests.map(async ({ id, query }) => {
-          const base = { type: "tool_result" as const, tool_use_id: id };
-          if (!query) return { ...base, is_error: true, content: 'Invalid call. The only tool is web_search with input { "query": string, "since"?: "YYYY-MM-DD" }.' };
+        requests.map(async ({ id, query }): Promise<ToolResult> => {
+          if (!query) return { id, isError: true, content: 'Invalid call. The only tool is web_search with input { "query": string, "since"?: "YYYY-MM-DD" }.' };
           // The tool list must not change mid-turn, so the budget is enforced here.
-          if (!allowed) return { ...base, is_error: true, content: "Search budget for this message is used up. Answer with what you have and say what you could not check." };
+          if (!allowed) return { id, isError: true, content: "Search budget for this message is used up. Answer with what you have and say what you could not check." };
           try {
-            return { ...base, content: renderResults(book.number(await search.search(query, signal))) };
+            return { id, content: renderResults(book.number(await search.search(query, signal))) };
           } catch {
-            return { ...base, is_error: true, content: "Search failed (provider unavailable). Tell the user what you could not check." };
+            return { id, isError: true, content: "Search failed (provider unavailable). Tell the user what you could not check." };
           }
         }),
       );
       if (signal.aborted) return idle;
       emit({ type: "sources", sources: book.all() });
-      // Assistant content goes back unchanged (it may contain thinking blocks the API expects to see again).
-      messages.push({ role: "assistant", content: final.content }, { role: "user", content: results });
+      session.addToolResults(results);
     }
 
-    let answer = final.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
-    if (final.stop_reason === "tool_use" || final.stop_reason === "refusal" || !answer.trim()) {
+    let answer = final.text;
+    if (final.stop === "tool_use" || final.stop === "refusal" || !answer.trim()) {
       // Nothing usable was streamed: say so rather than leaving an empty or half-finished bubble.
       answer =
-        final.stop_reason === "tool_use"
+        final.stop === "tool_use"
           ? "I ran out of search attempts before I could put an answer together. Could you ask again, a bit more specifically?"
           : "I can't help with that request.";
       emit({ type: "reset" });
@@ -247,13 +244,14 @@ export async function runTurn(input: TurnInput, emit: (e: TurnEvent) => void, si
       rounds,
       // Citations pointing at a number we never issued: should be 0; worth watching.
       unknownCitations: [...cited].filter((n) => !known.some((s) => s.n === n)).length,
-      inputTokens: final.usage.input_tokens,
-      outputTokens: final.usage.output_tokens,
+      provider: config.llmProvider,
+      inputTokens: final.inputTokens,
+      outputTokens: final.outputTokens,
     });
     return { background };
   } catch (err) {
     if (signal.aborted) return idle; // user closed the tab; nothing to report
-    const message = err instanceof ConfigError ? err.message : describeError(err);
+    const message = err instanceof ConfigError ? err.message : llm().describeError(err);
     emit({ type: "error", message, conversationId });
     log({ conversationId, totalMs: elapsed(), error: err instanceof Error ? err.name : "unknown" });
     return idle;

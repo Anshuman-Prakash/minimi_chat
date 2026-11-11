@@ -9,12 +9,24 @@ Design rationale is in [DESIGN.md](DESIGN.md) (one page). The full decision log 
 Requires Node 22.13 or newer (it uses Node's built-in SQLite, so there is nothing to compile).
 
 ```bash
-cp .env.example .env     # then add ANTHROPIC_API_KEY and TAVILY_API_KEY
+cp .env.example .env     # then add a model key and TAVILY_API_KEY (see below)
 npm install
 npm run dev              # http://localhost:3000
 ```
 
 One process serves the API and the UI. The database is a file at `data/minimi.db`, created on first run.
+
+### Keys
+
+You need one model key and the search key.
+
+| Key | What for | Cost |
+|---|---|---|
+| `GROQ_API_KEY` | The model, free option (open-weight models on Groq) | Free tier, no card: [console.groq.com/keys](https://console.groq.com/keys) |
+| `ANTHROPIC_API_KEY` | The model, best quality (Claude Sonnet and Haiku) | Prepaid credit: [platform.claude.com](https://platform.claude.com/) |
+| `TAVILY_API_KEY` | Web search and page extraction | Free tier: [app.tavily.com](https://app.tavily.com/) |
+
+Set either model key and the app uses it; with both set it uses Claude (`LLM_PROVIDER=groq` overrides). The app was designed around Claude, and the then-versus-now comparisons are noticeably more careful there. Groq is the way to run everything at no cost. Free plans limit tokens per minute, so a long re-check can be refused; if that happens, wait a minute or set `SEARCH_MAX_RESULTS=3`.
 
 ## Try the sample questions
 
@@ -69,7 +81,7 @@ How date phrases are read ("Monday", "last Tuesday", "3 November", "last week") 
 |---|---|
 | `npm run dev` | Starts the server and UI, restarting on code changes |
 | `npm run seed` | Loads the past conversations described above |
-| `npm run eval` | Runs 10 cases (the sample questions plus edge cases) through the real pipeline on a fresh database and prints latency, pass/fail checks and the answers. Add `-- --judge` for an LLM-graded rubric, `-- --only <name>` for one case. Uses both API keys. |
+| `npm run eval` | Runs 10 cases (the sample questions plus edge cases) through the real pipeline on a fresh database and prints latency, pass/fail checks and the answers. Add `-- --judge` for an LLM-graded rubric, `-- --only <name>` for one case. Calls the real model and search APIs. |
 | `npm test` | Unit tests for date resolution, recall and seeding. No API keys needed. |
 | `npm run typecheck` | TypeScript check |
 
@@ -93,6 +105,7 @@ src/temporal.ts      date phrases → day windows in the user's timezone
 src/recall.ts        memory lookup → the "memory" block, or an explicit "no record"
 src/planner.ts       should we search, and for what
 src/search/          SearchProvider interface (timeout, retry, cache) and the Tavily implementation
+src/llm/             LlmProvider interface, with Claude and OpenAI-compatible (Groq) implementations
 src/facts.ts         after each answer: the named things and checkable facts it contained
 src/context.ts       recent messages + rolling summary for long conversations
 src/sources.ts       citation numbering
@@ -106,6 +119,6 @@ test/                unit tests
 
 ## Configuration
 
-All keys are listed in [.env.example](.env.example). Required: `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`. Optional: `ANSWER_MODEL`, `FAST_MODEL`, `ANSWER_EFFORT`, `SEARCH_DEPTH`, `PORT`, `DB_PATH`, `DEFAULT_TZ`, `NOW_OVERRIDE`.
+All keys and settings are listed in [.env.example](.env.example). Required: `GROQ_API_KEY` or `ANTHROPIC_API_KEY`, and `TAVILY_API_KEY`. Optional: `LLM_PROVIDER`, `ANSWER_MODEL`, `FAST_MODEL`, `ANSWER_EFFORT`, `GROQ_BASE_URL`, `SEARCH_DEPTH`, `SEARCH_MAX_RESULTS`, `PORT`, `DB_PATH`, `DEFAULT_TZ`, `NOW_OVERRIDE`.
 
 Without a Tavily key the app still answers, saying that it could not check the web. It is single-user: there is no login, and memory is shared across all conversations.

@@ -168,3 +168,19 @@ Status: the eval script was exercised end to end against faked APIs. It has not 
 - **Not yet run against the real APIs.** Everything was built and tested without keys: unit tests for dates, recall and seeding (28), and the full turn pipeline against the Claude API and Tavily faked at the `fetch` level. Still to do with real keys: `npm run eval -- --judge`, then tune prompts and record the latency numbers.
 - **Latency targets are unmeasured.** If no-search answers miss ~1 s to first token, the first lever is skipping the planner for trivial messages (greetings), the second is `SEARCH_DEPTH=basic`.
 - **Things to watch in the first real run:** whether Tavily's `extract` returns usable text for JavaScript-heavy pricing pages; whether the planner sets `reverify` reliably; whether `unknownCitations` in the turn log stays at 0.
+
+## Model providers (added after Phase 6)
+
+**D53. The model is behind an `LlmProvider` interface with two implementations.** Reason: the Claude API has no standing free tier, and the project has to be runnable without paying, by me and by reviewers. `src/llm/claude.ts` is the original code path. `src/llm/openai-compatible.ts` speaks the OpenAI chat-completions format with plain `fetch` and defaults to Groq, whose free tier needs no card.
+The interface is three methods: `startAnswer()` returns a session with `next()` (stream one reply) and `addToolResults()`; `json()` returns schema-validated JSON; `describeError()`. The session owns the provider's own message list. That matters for Claude, whose thinking blocks must be sent back unchanged, and it keeps every provider-specific shape out of `agent.ts`.
+Rejected: replacing Claude outright (weaker answers on the exact behavior being judged); a local model via Ollama (reviewers would have to install it and download gigabytes, breaking "npm install, npm run dev"); one SDK per vendor (the OpenAI wire format covers Groq, Gemini's compatibility endpoint, OpenRouter and Ollama with one file).
+
+**D54. Provider is chosen by which key is present.** `GROQ_API_KEY` only: Groq. `ANTHROPIC_API_KEY` set: Claude. `LLM_PROVIDER` overrides. Default models: `openai/gpt-oss-120b` to answer and `openai/gpt-oss-20b` to plan on Groq (its flagship and its fastest small model, both with tool use and strict JSON output per Groq's docs); Sonnet 5.5 and Haiku 5.5 on Claude.
+
+**D55. Structured output on the OpenAI-compatible path: strict JSON schema first, JSON mode second, zod always.** The zod schema is converted to JSON Schema and sent as `response_format: json_schema, strict`. If the service answers 400 (model without schema support), the call is retried in plain JSON mode with the schema in the prompt. Either way the result is validated with the same zod schema before use.
+
+**D56. The stream parser accepts tool calls whole or in fragments.** Groq's docs don't specify which, so arguments are accumulated per call index and parsed at the end; unparsable arguments become an error result the model can correct.
+
+**D57. Known costs of the free path.** The prompts were written for Claude and are not tuned for open-weight models. Groq's gpt-oss models make one tool call per step (no parallel calls), so the planner's parallel pre-search matters more there. Free plans cap tokens per minute; a large re-verification request can be refused, which surfaces as a clear message and a `SEARCH_MAX_RESULTS` hint, not a crash. Refusal fallback and prompt caching are Claude-only.
+
+Tested offline with Groq faked at the `fetch` level: plan, search, a tool call streamed in fragments, answer, fact extraction, the JSON-mode fallback, and 429 / 413 handling. The Claude path was re-run unchanged. Neither has been run against the real service yet.
