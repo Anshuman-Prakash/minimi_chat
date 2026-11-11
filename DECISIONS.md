@@ -144,3 +144,17 @@ Rejected: the API's server-side compaction (beta, and built for clients that hol
 **D47. `runTurn` returns a `background` promise.** The server ignores it; the seed and eval scripts await it so the next step can rely on facts being stored.
 
 Tested offline (APIs faked at the `fetch` level): the re-verify turn re-fetches the cited URLs, keeps their numbers, applies the date filter only to the news query; facts are stored after the answer; a 34-message thread is summarised once and sends 23 messages.
+
+## Phase 5: seed data and eval
+
+**D48. `npm run seed` dates its conversations with the app's own resolver.** Each seeded conversation is declared with a phrase ("on Monday", "last Tuesday", "on 3 November", "on <today's weekday>") and placed on whatever day `resolveTemporal` returns for it right now. So the sample questions land on a seeded conversation on any day it is run, and under `NOW_OVERRIDE`. A test seeds on seven consecutive days and asserts that all three sample questions recall the right conversation each time.
+Seeded rows are tagged (`meta.seed`), so re-seeding replaces only its own conversations.
+
+**D49. Seeded prices are real, with one deliberate exception.** Prices were read from the vendors' pricing pages on 11 Nov 2026 and each has its real source URL. Neon's "$19/month" Launch minimum is its *old* pricing, seeded on purpose so the re-verify flow has a genuine change to report. Pipedrive was left off the CRM shortlist because its own pricing page couldn't be fetched and third-party sites disagreed; seeding an unverified price would undermine the demo.
+
+**D50. `npm run eval` drives the real pipeline (`runTurn`) on a fresh seeded database (`data/eval.db`).** Ten cases: the three sample questions, no memory for the date, an ambiguous weekday, a count mismatch ("7 tools" vs the 5 on record), a follow-up using "them", a plain fact, chit-chat, and a fresh search. For each it prints mode, exchanges recalled, searches, time to first status, plan time, time to first token, total time, and the answer.
+Two kinds of grading, kept separate: cheap deterministic checks (did it recall, did it avoid searching, does the answer name the tools, does it say "no record") that can fail the run, and an optional `--judge` pass where the answer model scores behavior, honesty and directness against a written expectation. The judge grades behavior, not live prices, because it can't check the web.
+
+**D51. Why in-process rather than over HTTP:** the eval measures the pipeline, not the socket; it can await the background fact extraction between the two messages of a follow-up case; and it needs no running server.
+
+Status: the eval script was exercised end to end against faked APIs. It has not yet been run against the real ones (no keys on the build machine), so the latency table and prompt quality are still unmeasured.

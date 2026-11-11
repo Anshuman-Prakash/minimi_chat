@@ -118,6 +118,14 @@ export function createConversation(title: string, at: Date): number {
   return Number(r.lastInsertRowid);
 }
 
+/** Removes conversations created by `npm run seed` (their messages carry meta.seed). Rows that depend on them cascade. */
+export function deleteSeeded(): number {
+  const r = db
+    .prepare("DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM messages WHERE json_extract(meta, '$.seed') = 1)")
+    .run();
+  return Number(r.changes);
+}
+
 export function conversationExists(id: number): boolean {
   return db.prepare("SELECT 1 FROM conversations WHERE id = ?").get(id) !== undefined;
 }
